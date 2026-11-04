@@ -1,0 +1,5 @@
+pyVoIP==1.6.8
+miniaudio>=1.60
+websocket-client>=1.7
+audioop-lts>=0.2.1; python_version >= "3.13"
+Pillow>=10.0   # only for app/make_logo.py

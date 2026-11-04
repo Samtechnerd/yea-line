@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+build/
+dist/
+installer-out/
+*.spec
+.pio/
+esp32-gateway/sdkconfig.*
+*.bak
+*.bak-*
+*.log
+log.txt
+*.pcap
