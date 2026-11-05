@@ -17,6 +17,9 @@ PBX (tested with FreePBX / Asterisk). It can also talk to **Home Assistant Assis
   forwards to Home Assistant's *Voice over IP* integration (see [pbx-examples](pbx-examples)).
 - **Runs in the system tray**: close the window and it keeps taking calls, with a notification for incoming ones. Optional start with Windows (starts hidden).
 - **Speed dial** (optional): turn it on in Settings, save numbers for slots 1 to 9, and choose the dial key: `*`, `#` or none (just the digit). Then dial e.g. `*1` and pick up.
+- **Phone screen** (USB): switch the MP50's own screen between light and dark, send your own screensaver pictures (up to 9, cropped to
+  its screen), choose how long it idles before the screensaver starts. The first time Yea-Line sees the phone it shows the Yea-Line
+  picture. Also a ringing tone while an outgoing call waits to be answered, and answering with the screen's Accept key.
 - Call history, light/dark theme (follows Windows), live keypad and call state. Pages scroll, so it fits small laptop screens.
 - Passwords (SIP secret, Home Assistant token) are kept in **Windows Credential Manager**, never in files.
 

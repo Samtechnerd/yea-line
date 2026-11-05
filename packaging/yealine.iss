@@ -1,7 +1,7 @@
 ; Yea-Line installer (Inno Setup 6). Per-user install: no administrator rights needed.
 ; Build the app first (packaging\build.ps1 does both steps).
 #define AppName "Yea-Line"
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.0"
 #define AppExe "Yea-Line.exe"
 
 [Setup]
