@@ -196,6 +196,7 @@ class App(tk.Tk):
         self.pad = {}
         self.ring_kind, self.ring_from, self.sip_note = "Incoming test", "", ""
         self.sip_live = ""
+        self.on_hold = False
         self.sip_state, self.sip_detail = "stopped", "not configured"
         self.assist_active, self.assist_state, self.assist_heard, self.assist_reply = False, "", "", ""
         self.assist_msg, self.assist_ok = "", None
@@ -837,9 +838,12 @@ class App(tk.Tk):
                 label = "Call"
             self._end_call()
             self._begin_call(label, self.ring_from if label == "Incoming call" else self.number)
+        elif kind == "sip_hold":
+            self.on_hold = bool(data.get("on"))
         elif kind == "hangup":
             self.off_hook = False
             self.sip_live = ""
+            self.on_hold = False
             self._end_call()
         elif kind == "bot_start":
             self.bot_active = True
@@ -889,6 +893,7 @@ class App(tk.Tk):
                 if data.get("direction") == "in":
                     self.ringing = False
             elif st == "ended":
+                self.on_hold = False
                 was_ringing = self.ringing and data.get("direction") == "in"
                 self.ringing = False
                 reason = data.get("reason", "")
@@ -994,6 +999,9 @@ class App(tk.Tk):
             text, color, detail = kind, t["accent"], "Keypad menu is running through the phone"
         elif self.off_hook and self.sip_live in ("dialing", "ringing"):
             text, color, detail = "Calling", t["accent"], self.sip_note
+        elif self.off_hook and self.sip_live == "answered" and self.on_hold:
+            text, color = "On hold", t["accent"]
+            detail = "The other person hears: You have been placed on hold. Press Hold again to resume."
         elif self.off_hook and self.sip_live == "answered":
             text, color, detail = "In call", t["green"], self.sip_note
         elif self.off_hook:

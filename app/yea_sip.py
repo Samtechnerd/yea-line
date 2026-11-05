@@ -115,6 +115,8 @@ class SipClient:
         self.cfg = None            # dict: server, port, user, password, sip_port
         self.phone = None
         self.call = None           # active VoIPCall (outgoing, or incoming once answered)
+        self.held = False          # we put the far end on hold (announcement plays to them, audio both ways paused)
+        self._hold_stop = None
         self.pending = None        # incoming VoIPCall that is ringing
         self.status = "stopped"
         self._bridge_stop = None
@@ -320,6 +322,8 @@ class SipClient:
                 blk = mic.read()
                 if blk is None:
                     continue
+                if self.held:
+                    continue
                 writes += 1
                 if writes == 100:
                     self.log(f"  (audio bridge: {writes / (time.monotonic() - t0):.0f} mic blocks/s written to the call)")
@@ -338,7 +342,7 @@ class SipClient:
                     data = call.read_audio(160, False)  # non-blocking so we can stop promptly
                 except Exception:
                     break
-                if data:
+                if data and not self.held:
                     pcm = audioop.lin2lin(audioop.bias(data, 1, 128), 1, 2)
                     if spk.rate != 8000:
                         pcm, state = audioop.ratecv(pcm, 2, 1, 8000, spk.rate, state)
@@ -360,7 +364,68 @@ class SipClient:
         rx_t.start()
         self._cleanup = cleanup
 
+    # ---- hold ----------------------------------------------------------
+    def active(self):
+        """True while a call is connected (not just dialling or ringing)."""
+        return bool(self.call and self._bridge_stop)
+
+    def toggle_hold(self):
+        """Hold or resume the connected call. Returns the new state, or None when there is no connected call."""
+        if not self.active():
+            return None
+        if self.held:
+            self._hold_off()
+        else:
+            self.held = True
+            stop = self._hold_stop = threading.Event()
+            threading.Thread(target=self._hold_announce, args=(self.call, stop), daemon=True).start()
+            self.emit("sip_hold", on=True)
+        return self.held
+
+    def _hold_off(self):
+        self.held = False
+        if self._hold_stop:
+            self._hold_stop.set()
+            self._hold_stop = None
+        self.emit("sip_hold", on=False)
+
+    def _hold_announce(self, call, stop):
+        """Tell the far end they have been put on hold now, and again every 30 s while they wait."""
+        import audioop
+        import wave
+        try:
+            with wave.open(audio.tts_wav("You have been placed on hold. Please wait."), "rb") as wf:
+                pcm, rate, ch, width = wf.readframes(wf.getnframes()), wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
+            if ch == 2:
+                pcm = audioop.tomono(pcm, width, 0.5, 0.5)
+            if width != 2:
+                pcm = audioop.lin2lin(pcm, width, 2)
+            pcm, _ = audioop.ratecv(pcm, 2, 1, rate, 8000, None)
+            u8 = audioop.bias(audioop.lin2lin(pcm, 2, 1), 1, 128)  # what pyVoIP wants: 8-bit unsigned, 8 kHz
+        except Exception as e:
+            self.log(f"  !! could not make the hold announcement: {e}")
+            return
+        silence = bytes([128]) * 160
+        while not stop.is_set():
+            nxt = time.monotonic()
+            for i in range(0, len(u8), 160):
+                if stop.is_set():
+                    return
+                try:
+                    call.write_audio((u8[i:i + 160] + silence)[:160])
+                except Exception:
+                    return
+                nxt += 0.02
+                time.sleep(max(0.0, nxt - time.monotonic()))
+            for _ in range(300):
+                if stop.wait(0.1):
+                    return
+
     def _stop_bridge(self):
+        self.held = False
+        if self._hold_stop:
+            self._hold_stop.set()
+            self._hold_stop = None
         if self._bridge_stop:
             self._bridge_stop.set()
             self._bridge_stop = None

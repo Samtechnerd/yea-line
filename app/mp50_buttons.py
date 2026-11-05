@@ -159,11 +159,21 @@ class Decoder:
         self.timer = None
         self.dial_open = False  # off hook, still collecting digits before dialling
         self.dial_timer = None
+        self.btn_prev = 0       # function-key bits last seen in byte1
 
     def feed(self, rep):
         if len(rep) != 3 or rep[0] != 2:
             return
         hook, flag, val = rep[1] & 1, bool(rep[1] & 0x80), rep[2]
+        # function keys share byte1 with the hook bit: 0x02 key 0x97, 0x04 mute, 0x08 flash (the Hold key), 0x10 redial
+        btn = rep[1] & 0x1E
+        rising, self.btn_prev = btn & ~self.btn_prev, btn
+        if btn and not (flag or val):
+            if rising & 0x08:
+                on_hold_key()
+            elif rising:
+                out(f"{time.strftime('%H:%M:%S')}  >> key pressed (bits 0x{rising:02X}: not used)")
+            return
         if flag or val:  # a key token
             k = 2 * val if flag else 2 * val - 1
             if 0 <= k < len(KEYS):
@@ -251,6 +261,17 @@ class Decoder:
         if args.hangup_cmd:
             import subprocess
             subprocess.Popen(args.hangup_cmd, shell=True)
+
+
+def on_hold_key():
+    """The Hold key: hold or resume a connected SIP call; the far end hears 'You have been placed on hold'."""
+    stamp = time.strftime('%H:%M:%S')
+    on = sip.toggle_hold()
+    if on is None:
+        out(f"{stamp}  >> HOLD key (only works during a connected SIP call)")
+        return
+    out(f"{stamp}  >> {'ON HOLD' if on else 'RESUMED'}")
+    _leds(0x17, 0x20) if on else _leds(0x17, 0x21)  # Hold light on / back to the normal in-call lights
 
 
 def _leds(*usages):
