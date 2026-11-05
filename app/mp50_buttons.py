@@ -160,6 +160,7 @@ class Decoder:
         self.dial_open = False  # off hook, still collecting digits before dialling
         self.dial_timer = None
         self.btn_prev = 0       # function-key bits last seen in byte1
+        self.key_answered = False  # the call was answered with the screen's Accept button (hands-free), not the handset
 
     def feed(self, rep):
         if len(rep) != 3 or rep[0] != 2:
@@ -171,8 +172,10 @@ class Decoder:
         if btn and not (flag or val):
             if rising & 0x08:
                 on_hold_key()
-            elif rising:
-                out(f"{time.strftime('%H:%M:%S')}  >> key pressed (bits 0x{rising:02X}: not used)")
+            if rising & 0x02:
+                self.on_accept_key()
+            if rising & 0x14:
+                out(f"{time.strftime('%H:%M:%S')}  >> key pressed (bits 0x{rising & 0x14:02X}: not used)")
             return
         if flag or val:  # a key token
             k = 2 * val if flag else 2 * val - 1
@@ -193,6 +196,8 @@ class Decoder:
                 self.off_hook = True
                 number = "".join(self.digits)
                 if not number and (_ringing or sip.pending):
+                    _leds()      # ring light off and "answered" on straight away: the phone only takes it in the
+                    _leds(0x17)  # first moments after pick-up, otherwise it stays on its incoming-call screen
                     self.on_pickup("")  # answering an incoming call: nothing to dial
                 elif not (_in_call or assist.active or sip.call):
                     self.dial_open = True  # keep collecting digits; dial when they stop
@@ -222,8 +227,25 @@ class Decoder:
         if number:
             self.on_pickup(number)
 
+    def on_accept_key(self):
+        """The Accept (answer / end) key on the phone's screen, bit 0x02 of byte1."""
+        stamp = time.strftime('%H:%M:%S')
+        if not self.off_hook and (_ringing or sip.pending):
+            out(f"{stamp}  >> ACCEPT key (answering hands-free)")
+            self.off_hook = True
+            self.key_answered = True
+            _leds()
+            _leds(0x17)
+            self.on_pickup("")
+        elif self.off_hook and self.key_answered:
+            out(f"{stamp}  >> END key")
+            self._confirm_hangup()
+        else:
+            out(f"{stamp}  >> key pressed (bits 0x02: not used)")
+
     def _confirm_hangup(self):
         self.timer = None
+        self.key_answered = False
         self.off_hook = False
         self.digits = []
         self.dial_open = False
