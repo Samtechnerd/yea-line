@@ -67,6 +67,7 @@ import mp50_buttons as m  # noqa: E402  (parses sys.argv on import)
 import mp50_phone as phone_screen  # noqa: E402
 import mp50_store as store  # noqa: E402
 import yea_assets as assets  # noqa: E402
+import yea_picture  # noqa: E402
 import yea_cred as cred  # noqa: E402
 
 LIGHT = dict(bg="#f4f5f7", card="#ffffff", text="#1c1e21", muted="#6b7280", border="#e5e7eb", input="#f3f4f6",
@@ -255,6 +256,8 @@ class App(tk.Tk):
         self.wait_var.trace_add("write", lambda *_: self._save())
         self.saver_var = tk.StringVar(value=ps.get("saver", ""))
         self.saver_var.trace_add("write", lambda *_: self._save())
+        self.welcome_done = bool(ps.get("welcome_done"))  # the Yea-Line picture has been offered to a phone once
+        self._welcome_busy, self._welcome_next = False, 0.0
         self._phone_msg = None  # (text, colour name), set by the worker threads and shown by _tick
         self._thumbs = []
 
@@ -359,7 +362,8 @@ class App(tk.Tk):
                              "speed_dial": {"enabled": self.sd_enabled.get(), "prefix": self._sd_prefix(),
                                             "entries": {d: {"name": self.sd_name[d].get().strip(),
                                                             "number": self.sd_num[d].get().strip()} for d in "123456789"}},
-                             "phone_screen": {"pictures": self.pics, "wait": self.wait_var.get(), "saver": self.saver_var.get()},
+                             "phone_screen": {"pictures": self.pics, "wait": self.wait_var.get(), "saver": self.saver_var.get(),
+                                              "welcome_done": self.welcome_done},
                              "test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
                              "mic": m.ivr.mic or "", "theme": THEME_NAMES.get(self.theme_var.get(), "auto"),
                              "assist": {"url": self.ha_url.get().strip(), "pipeline": self.ha_pipeline.get().strip(),
@@ -708,6 +712,7 @@ class App(tk.Tk):
         btns = tk.Frame(card, bg=t["card"])
         btns.pack(fill="x", padx=16, pady=(8, 0))
         ttk.Button(btns, text="Add pictures...", command=self._add_pictures).pack(side="left")
+        ttk.Button(btns, text="Add the Yea-Line picture", command=self._add_yealine_picture).pack(side="left", padx=(6, 0))
         ttk.Button(btns, text="Send to phone", style="Accent.TButton", command=self._send_pictures).pack(side="left", padx=6)
         ttk.Button(btns, text="Remove them from the phone", command=lambda: self._phone_job(
             "Removing my pictures", phone_screen.remove_my_pictures)).pack(side="left")
@@ -781,7 +786,44 @@ class App(tk.Tk):
         if len(paths) > len(added):
             self._phone_msg = (f"Added {len(added)}; skipped duplicates or anything over {phone_screen.MAX_PICTURES}.", "muted")
 
-    def _send_pictures(self):
+    def _welcome_file(self):
+        """The Yea-Line screensaver picture, written next to the settings so it can be listed like any other picture."""
+        path = os.path.join(store.DIR, "yea-line-picture.jpg")
+        if not os.path.exists(path):
+            import base64 as b64
+            os.makedirs(store.DIR, exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(b64.b64decode(yea_picture.JPEG_B64))
+        return path
+
+    def _add_yealine_picture(self):
+        path = self._welcome_file()
+        if path in self.pics:
+            self._phone_msg = ("The Yea-Line picture is already in the list.", "muted")
+        elif len(self.pics) >= phone_screen.MAX_PICTURES:
+            self._phone_msg = (f"That is the most ({phone_screen.MAX_PICTURES}). Remove one first.", "red")
+        else:
+            self.pics.insert(0, path)
+            self._show_pictures()
+            self._save()
+
+    def _maybe_welcome(self):
+        """The first time the phone is seen over USB, show the Yea-Line picture on its screensaver (once)."""
+        if self.welcome_done or self._welcome_busy or time.time() < self._welcome_next:
+            return
+        try:
+            if not phone_screen.available():
+                return
+        except Exception:
+            return
+        self._welcome_busy = True
+        path = self._welcome_file()
+        if path not in self.pics:
+            self.pics.insert(0, path)
+            self._show_pictures()
+        self._send_pictures(welcome=True)
+
+    def _send_pictures(self, welcome=False):
         paths = list(self.pics)
         if not paths:
             self._phone_msg = ("Add at least one picture first.", "red")
@@ -796,9 +838,14 @@ class App(tk.Tk):
                     self._phone_msg = (f"Sending to the phone ({i}/{n})...", "muted")
                 phone_screen.upload_pictures(jpegs, progress)
                 self._saver_pending = self.SAVER_CHOICES[1]  # applied by _tick on the UI thread
-                self._phone_msg = (f"{len(paths)} picture(s) sent. The phone shows them when it goes idle.", "green")
+                self.welcome_done = True
+                self._phone_msg = (("Your phone now shows the Yea-Line picture as its screensaver. " if welcome else "")
+                                   + f"{len(paths)} picture(s) sent. The phone shows them when it goes idle.", "green")
             except Exception as e:
+                self._welcome_next = time.time() + 60  # try again in a minute if this was the automatic first send
                 self._phone_msg = (str(e) or "Could not send the pictures.", "red")
+            finally:
+                self._welcome_busy = False
         threading.Thread(target=run, daemon=True).start()
 
     # ---- Home Assistant Assist ----------------------------------------
@@ -1148,6 +1195,7 @@ class App(tk.Tk):
             found = False
         self.audio_lbl.configure(text="Phone audio: " + ("connected" if found else "not found - check the USB cable"),
                                  fg=self.t["muted"] if found else self.t["red"])
+        self._maybe_welcome()
         self.after(3000, self._check_phone)
 
     def _render(self):
