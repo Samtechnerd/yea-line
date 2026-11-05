@@ -16,7 +16,7 @@ PBX (tested with FreePBX / Asterisk). It can also talk to **Home Assistant Assis
 - **Home Assistant Assist**: dial a number (`#999` by default) to talk to your voice assistant, or dial an extension on the PBX that
   forwards to Home Assistant's *Voice over IP* integration (see [pbx-examples](pbx-examples)).
 - **Runs in the system tray**: close the window and it keeps taking calls, with a notification for incoming ones. Optional start with Windows (starts hidden).
-- **Speed dial** (optional): turn it on in Settings, save numbers for `*1` to `*9`, then dial `*1` and pick up.
+- **Speed dial** (optional): turn it on in Settings, save numbers for slots 1 to 9, and choose the dial key: `*`, `#` or none (just the digit). Then dial e.g. `*1` and pick up.
 - Call history, light/dark theme (follows Windows), live keypad and call state. Pages scroll, so it fits small laptop screens.
 - Passwords (SIP secret, Home Assistant token) are kept in **Windows Credential Manager**, never in files.
 
