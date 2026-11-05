@@ -6,14 +6,14 @@ self-test that rebuilds the recorded messages byte for byte.
 
 Two kinds of message:
   * short commands, one report:      c8 13 LL LL | op(2) id(2) | fields ...     LL LL = 16 + payload length
-      op 01 open a file, 03 seek, 02 close
+      op 01 open a file, 03 seek, 02 close, 16 run a shell command (`rm <file>`; the Yealink app also sets the clock
+      with `date -s`). That one runs on the phone, so only the fixed command below is ever built.
   * long messages, up to 3 reports:  c8 11 / c8 10 / c8 12 | u16 | up to 1020 bytes of the message
       a message is a 16 byte header (op(2) id(2) u32 length, u32 a, u32 b) plus a 2048 byte body
       op 07 set a setting (key padded to 32 bytes, then the value as text), op 05 write file data
 The phone echoes every message back, and a file open returns the file handle.
 """
 import ctypes
-import datetime
 import io
 import queue
 import random
@@ -27,6 +27,9 @@ k32 = led.k32
 REPORT = 1024
 SCREEN = (288, 480)  # the MP50's screen, portrait
 SAVER_DIR = "/data/userdata/screensaver/"
+# The phone shows the first file by name (also the newest one when this is rewritten each time), and only rereads the
+# folder when the screensaver mode is switched on. So every picture goes into this one file, then the mode is toggled.
+SAVER_FILE = "00000000-yealine.jpg"
 
 # screensaver delay choices shown in the UI: label -> seconds
 WAIT_CHOICES = {"1 minute": 60, "2 minutes": 120, "5 minutes": 300, "10 minutes": 600, "15 minutes": 900,
@@ -81,6 +84,15 @@ def msg_seek_start(handle):
 
 def msg_close(handle):
     return _short(b"\x02\x02", _rid(), struct.pack("<III", 0, handle, 0))
+
+
+def msg_remove_picture(name):
+    """Delete one picture from the screensaver folder. The name must be a plain .jpg file name: nothing else is sent."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}\.jpg", name) or ".." in name:
+        raise PhoneError("Refusing to delete that file name.")
+    text = ("rm " + SAVER_DIR + name).encode() + b"\0"
+    return _short(b"\x16\x02", _rid(), struct.pack("<I", len(text)) + bytes(8), text)
 
 
 def vendor_path():
@@ -182,9 +194,9 @@ def prepare_picture(path):
     return jpeg + bytes(-len(jpeg) % 2048)
 
 
-def upload_picture(jpeg, progress=None):
+def upload_picture(jpeg, progress=None, name=None):
     """Send a prepared picture into the phone's screensaver folder and switch the screensaver to custom pictures."""
-    name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".jpg"
+    name = name or SAVER_FILE
     with _lock:
         ch = Channel()
         try:
@@ -204,8 +216,30 @@ def upload_picture(jpeg, progress=None):
                     progress(i // 2048 + 1, total)
             ch.send(msg_close(handle))
             ch.wait(0x02)
+            ch.send(msg_setting("screensaver.mode", "0"))  # off and on again makes the phone reread the folder
+            time.sleep(1.0)
             ch.send(msg_setting("screensaver.mode", "1"))
             time.sleep(0.5)
         finally:
             ch.close()
     return name
+
+
+def remove_pictures(names, switch_to_system=False):
+    """Delete pictures (file names) from the phone's screensaver folder; optionally go back to the system screensavers."""
+    with _lock:
+        ch = Channel()
+        try:
+            for n in names:
+                ch.send(msg_remove_picture(n))
+                time.sleep(0.4)
+            if switch_to_system:
+                ch.send(msg_setting("screensaver.mode", "0"))
+                time.sleep(0.5)
+        finally:
+            ch.close()
+
+
+def remove_my_picture():
+    """The picture Yea-Line sent: delete it and fall back to the system screensavers."""
+    remove_pictures([SAVER_FILE], switch_to_system=True)

@@ -692,8 +692,8 @@ class App(tk.Tk):
         btns.pack(anchor="w")
         ttk.Button(btns, text="Choose picture...", command=self._pick_picture).pack(side="left")
         ttk.Button(btns, text="Send to phone", style="Accent.TButton", command=self._send_picture).pack(side="left", padx=6)
-        ttk.Button(btns, text="Use system pictures", command=lambda: self._phone_job(
-            "Switching to the system screensavers", phone_screen.use_custom_screensaver, False)).pack(side="left")
+        ttk.Button(btns, text="Remove picture", command=lambda: self._phone_job(
+            "Removing the picture", phone_screen.remove_my_picture)).pack(side="left")
         self._show_picture(self.pic_path.get())
 
         row = tk.Frame(card, bg=t["card"])
@@ -719,7 +719,7 @@ class App(tk.Tk):
         def run():
             try:
                 fn(*args)
-                self._phone_msg = (text.replace("Setting", "Set").replace("Switching", "Switched") + ": done.", "green")
+                self._phone_msg = (text.replace("Setting", "Set").replace("Removing", "Removed") + ": done.", "green")
             except Exception as e:
                 self._phone_msg = (str(e) or "That did not work.", "red")
         threading.Thread(target=run, daemon=True).start()
