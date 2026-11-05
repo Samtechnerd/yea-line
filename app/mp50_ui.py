@@ -250,11 +250,13 @@ class App(tk.Tk):
         self.sd_prefix.trace_add("write", lambda *_: self._apply_speed())
         self._apply_speed(save=False)
         ps = cfg.get("phone_screen", {})
-        self.pic_path = tk.StringVar(value=ps.get("picture", ""))
+        self.pics = [p for p in ps.get("pictures", []) if isinstance(p, str)]
         self.wait_var = tk.StringVar(value=ps.get("wait", ""))
         self.wait_var.trace_add("write", lambda *_: self._save())
+        self.saver_var = tk.StringVar(value=ps.get("saver", ""))
+        self.saver_var.trace_add("write", lambda *_: self._save())
         self._phone_msg = None  # (text, colour name), set by the worker threads and shown by _tick
-        self._pic_img = None
+        self._thumbs = []
 
         self.dark = self._want_dark()
         self._build()
@@ -357,7 +359,7 @@ class App(tk.Tk):
                              "speed_dial": {"enabled": self.sd_enabled.get(), "prefix": self._sd_prefix(),
                                             "entries": {d: {"name": self.sd_name[d].get().strip(),
                                                             "number": self.sd_num[d].get().strip()} for d in "123456789"}},
-                             "phone_screen": {"picture": self.pic_path.get(), "wait": self.wait_var.get()},
+                             "phone_screen": {"pictures": self.pics, "wait": self.wait_var.get(), "saver": self.saver_var.get()},
                              "test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
                              "mic": m.ivr.mic or "", "theme": THEME_NAMES.get(self.theme_var.get(), "auto"),
                              "assist": {"url": self.ha_url.get().strip(), "pipeline": self.ha_pipeline.get().strip(),
@@ -668,6 +670,8 @@ class App(tk.Tk):
         self._build_phone_screen(page)
 
     # ---- the phone's own screen ----------------------------------------
+    SAVER_CHOICES = ("System screensaver", "My pictures")
+
     def _build_phone_screen(self, page):
         t = self.t
         card = self._card(page, "PHONE SCREEN (USB ONLY)")
@@ -681,23 +685,15 @@ class App(tk.Tk):
 
         row = tk.Frame(card, bg=t["card"])
         row.pack(fill="x", padx=16, pady=(12, 0))
-        self.pic_thumb = tk.Label(row, bg=t["input"], width=9, height=6, text="no\npicture", fg=t["muted"], font=(FONT, 9))
-        self.pic_thumb.pack(side="left")
-        col = tk.Frame(row, bg=t["card"])
-        col.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        self._label(col, "Screensaver picture").pack(anchor="w")
-        self.pic_name = self._label(col, "", muted=True, size=10, anchor="w")
-        self.pic_name.pack(fill="x", pady=(2, 6))
-        btns = tk.Frame(col, bg=t["card"])
-        btns.pack(anchor="w")
-        ttk.Button(btns, text="Choose picture...", command=self._pick_picture).pack(side="left")
-        ttk.Button(btns, text="Send to phone", style="Accent.TButton", command=self._send_picture).pack(side="left", padx=6)
-        ttk.Button(btns, text="Remove picture", command=lambda: self._phone_job(
-            "Removing the picture", phone_screen.remove_my_picture)).pack(side="left")
-        self._show_picture(self.pic_path.get())
+        self._label(row, "Screensaver shows").pack(side="left")
+        combo = ttk.Combobox(row, textvariable=self.saver_var, values=list(self.SAVER_CHOICES), state="readonly",
+                             width=20, font=(FONT, 11))
+        combo.pack(side="left", padx=10)
+        combo.bind("<<ComboboxSelected>>", lambda e: self._phone_job(
+            "Setting the screensaver", phone_screen.use_custom_screensaver, self.saver_var.get() == self.SAVER_CHOICES[1]))
 
         row = tk.Frame(card, bg=t["card"])
-        row.pack(fill="x", padx=16, pady=(12, 0))
+        row.pack(fill="x", padx=16, pady=(8, 0))
         self._label(row, "Screensaver starts after").pack(side="left")
         combo = ttk.Combobox(row, textvariable=self.wait_var, values=list(phone_screen.WAIT_CHOICES), state="readonly",
                              width=12, font=(FONT, 11))
@@ -706,10 +702,22 @@ class App(tk.Tk):
             "Setting the screensaver delay", phone_screen.set_screensaver_wait,
             phone_screen.WAIT_CHOICES.get(self.wait_var.get(), 7200)))
 
+        self._label(card, "My pictures", bold=True, anchor="w").pack(fill="x", padx=16, pady=(14, 0))
+        self.pic_row = tk.Frame(card, bg=t["card"])
+        self.pic_row.pack(fill="x", padx=16, pady=(6, 0))
+        btns = tk.Frame(card, bg=t["card"])
+        btns.pack(fill="x", padx=16, pady=(8, 0))
+        ttk.Button(btns, text="Add pictures...", command=self._add_pictures).pack(side="left")
+        ttk.Button(btns, text="Send to phone", style="Accent.TButton", command=self._send_pictures).pack(side="left", padx=6)
+        ttk.Button(btns, text="Remove them from the phone", command=lambda: self._phone_job(
+            "Removing my pictures", phone_screen.remove_my_pictures)).pack(side="left")
+        self._show_pictures()
+
         self.phone_status = self._label(card, "", muted=True, size=10, anchor="w", wraplength=px(560), justify="left")
         self.phone_status.pack(fill="x", padx=16, pady=(10, 0))
         self._label(card, "Changes the phone's own screen over its USB cable, the way Yealink USB Connect does. Pictures are "
-                    "cropped to the phone's 288x480 screen. Close Yealink USB Connect first so the two do not fight.",
+                    f"cropped to the phone's 288x480 screen (up to {phone_screen.MAX_PICTURES}). Send replaces the pictures "
+                    "Yea-Line sent before. Close Yealink USB Connect first so the two do not fight.",
                     muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(6, 14))
 
     def _phone_job(self, text, fn, *args):
@@ -724,47 +732,73 @@ class App(tk.Tk):
                 self._phone_msg = (str(e) or "That did not work.", "red")
         threading.Thread(target=run, daemon=True).start()
 
-    def _show_picture(self, path):
-        self.pic_name.configure(text=os.path.basename(path) if path else "None chosen")
-        self._pic_img = None
-        if not path or not os.path.exists(path):
-            self.pic_thumb.configure(image="", text="no\npicture", width=9, height=6)
-            return
-        try:
-            from PIL import Image, ImageOps
-            im = ImageOps.fit(ImageOps.exif_transpose(Image.open(path)).convert("RGB"), (px(60), px(100)))
-            buf = io.BytesIO()
-            im.save(buf, "PNG")
-            self._pic_img = tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
-            self.pic_thumb.configure(image=self._pic_img, text="", width=px(60), height=px(100))
-        except Exception:
-            self.pic_thumb.configure(image="", text="?", width=9, height=6)
+    def _thumb(self, path):
+        from PIL import Image, ImageOps
+        im = ImageOps.fit(ImageOps.exif_transpose(Image.open(path)).convert("RGB"), (px(54), px(90)))
+        buf = io.BytesIO()
+        im.save(buf, "PNG")
+        return tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
 
-    def _pick_picture(self):
-        path = filedialog.askopenfilename(title="Choose a screensaver picture",
-                                          filetypes=[("Pictures", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")])
-        if path:
-            self.pic_path.set(path)
-            self._show_picture(path)
+    def _show_pictures(self):
+        t = self.t
+        for w in self.pic_row.winfo_children():
+            w.destroy()
+        self._thumbs = []
+        if not self.pics:
+            self._label(self.pic_row, "None yet. Add up to %d pictures." % phone_screen.MAX_PICTURES, muted=True, size=10
+                        ).pack(anchor="w")
+            return
+        for i, path in enumerate(self.pics):
+            cell = tk.Frame(self.pic_row, bg=t["card"])
+            cell.grid(row=0, column=i, padx=(0, 8))
+            try:
+                img = self._thumb(path)
+                self._thumbs.append(img)
+                tk.Label(cell, image=img, bg=t["input"]).pack()
+            except Exception:
+                tk.Label(cell, text="missing", bg=t["input"], fg=t["red"], width=7, height=5, font=(FONT, 8)).pack()
+            tk.Button(cell, text="Remove", relief="flat", bg=t["card"], fg=t["muted"], activebackground=t["card"],
+                      font=(FONT, 8), command=lambda i=i: self._drop_picture(i)).pack()
+
+    def _drop_picture(self, i):
+        if 0 <= i < len(self.pics):
+            del self.pics[i]
+            self._show_pictures()
             self._save()
 
-    def _send_picture(self):
-        path = self.pic_path.get()
-        if not path or not os.path.exists(path):
-            self._phone_msg = ("Choose a picture first.", "red")
+    def _add_pictures(self):
+        room = phone_screen.MAX_PICTURES - len(self.pics)
+        if room <= 0:
+            self._phone_msg = (f"That is the most ({phone_screen.MAX_PICTURES}). Remove one first.", "red")
             return
-        self._phone_msg = ("Preparing the picture...", "muted")
+        paths = filedialog.askopenfilenames(title="Choose screensaver pictures",
+                                            filetypes=[("Pictures", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")])
+        added = [p for p in paths if p not in self.pics][:room]
+        if added:
+            self.pics.extend(added)
+            self._show_pictures()
+            self._save()
+        if len(paths) > len(added):
+            self._phone_msg = (f"Added {len(added)}; skipped duplicates or anything over {phone_screen.MAX_PICTURES}.", "muted")
+
+    def _send_pictures(self):
+        paths = list(self.pics)
+        if not paths:
+            self._phone_msg = ("Add at least one picture first.", "red")
+            return
+        self._phone_msg = ("Preparing the pictures...", "muted")
 
         def run():
             try:
-                jpeg = phone_screen.prepare_picture(path)
+                jpegs = [phone_screen.prepare_picture(p) for p in paths]
 
                 def progress(i, n):
-                    self._phone_msg = (f"Sending the picture to the phone ({i}/{n})...", "muted")
-                phone_screen.upload_picture(jpeg, progress)
-                self._phone_msg = ("Picture sent. The phone shows it when it goes idle.", "green")
+                    self._phone_msg = (f"Sending to the phone ({i}/{n})...", "muted")
+                phone_screen.upload_pictures(jpegs, progress)
+                self._saver_pending = self.SAVER_CHOICES[1]  # applied by _tick on the UI thread
+                self._phone_msg = (f"{len(paths)} picture(s) sent. The phone shows them when it goes idle.", "green")
             except Exception as e:
-                self._phone_msg = (str(e) or "Could not send the picture.", "red")
+                self._phone_msg = (str(e) or "Could not send the pictures.", "red")
         threading.Thread(target=run, daemon=True).start()
 
     # ---- Home Assistant Assist ----------------------------------------
@@ -1094,6 +1128,9 @@ class App(tk.Tk):
             text, colour = self._phone_msg
             self._phone_msg = None
             self.phone_status.configure(text=text, fg=self.t[colour])
+        if getattr(self, "_saver_pending", None):
+            self.saver_var.set(self._saver_pending)
+            self._saver_pending = None
         self.level *= 0.8
         w = max(self.meter.winfo_width(), 1)
         self.meter.delete("all")

@@ -27,12 +27,17 @@ k32 = led.k32
 REPORT = 1024
 SCREEN = (288, 480)  # the MP50's screen, portrait
 SAVER_DIR = "/data/userdata/screensaver/"
-# The phone shows the first file by name (also the newest one when this is rewritten each time), and only rereads the
-# folder when the screensaver mode is switched on. So every picture goes into this one file, then the mode is toggled.
-SAVER_FILE = "00000000-yealine.jpg"
+# The phone only rereads the screensaver folder when the screensaver mode is switched on, so after sending pictures the mode
+# is toggled. Pictures are named so they sort before the Yealink app's own timestamp names. At most MAX_PICTURES.
+MAX_PICTURES = 9
+LEGACY_FILES = ["00000000-yealine.jpg"]  # the single fixed name an earlier version used
+
+
+def picture_name(i):
+    return f"0000-yealine-{i}.jpg"
 
 # screensaver delay choices shown in the UI: label -> seconds
-WAIT_CHOICES = {"1 minute": 60, "2 minutes": 120, "5 minutes": 300, "10 minutes": 600, "15 minutes": 900,
+WAIT_CHOICES = {"30 seconds": 30, "1 minute": 60, "2 minutes": 120, "5 minutes": 300, "10 minutes": 600, "15 minutes": 900,
                 "30 minutes": 1800, "1 hour": 3600, "2 hours": 7200}
 
 
@@ -194,45 +199,61 @@ def prepare_picture(path):
     return jpeg + bytes(-len(jpeg) % 2048)
 
 
-def upload_picture(jpeg, progress=None, name=None):
-    """Send a prepared picture into the phone's screensaver folder and switch the screensaver to custom pictures."""
-    name = name or SAVER_FILE
+def _send_file(ch, name, jpeg, progress, done, total):
+    ch.send(msg_open(SAVER_DIR + name))
+    r = ch.wait(0x01)
+    if not r:
+        raise PhoneError("The phone did not answer. Try unplugging and replugging it.")
+    handle = struct.unpack_from("<I", r, 12)[0]
+    ch.send(msg_seek_start(handle))
+    ch.wait(0x03)
+    for i in range(0, len(jpeg), 2048):
+        ch.send(msg_write(handle, jpeg[i:i + 2048]))
+        if not ch.wait(0x05, 1.5):
+            raise PhoneError("The phone stopped answering while receiving a picture.")
+        done += 1
+        if progress:
+            progress(done, total)
+    ch.send(msg_close(handle))
+    ch.wait(0x02)
+    return done
+
+
+def upload_pictures(jpegs, progress=None):
+    """Send prepared pictures (a list of JPEG bytes, at most MAX_PICTURES) into the phone's screensaver folder, remove
+    any older ones of ours, and switch the screensaver to custom pictures."""
+    if not jpegs:
+        raise PhoneError("Add at least one picture first.")
+    if len(jpegs) > MAX_PICTURES:
+        raise PhoneError(f"At most {MAX_PICTURES} pictures.")
+    total = sum(len(j) // 2048 for j in jpegs)
     with _lock:
         ch = Channel()
         try:
-            ch.send(msg_open(SAVER_DIR + name))
-            r = ch.wait(0x01)
-            if not r:
-                raise PhoneError("The phone did not answer. Try unplugging and replugging it.")
-            handle = struct.unpack_from("<I", r, 12)[0]
-            ch.send(msg_seek_start(handle))
-            ch.wait(0x03)
-            total = len(jpeg) // 2048
-            for i in range(0, len(jpeg), 2048):
-                ch.send(msg_write(handle, jpeg[i:i + 2048]))
-                if not ch.wait(0x05, 1.5):
-                    raise PhoneError(f"The phone stopped answering while receiving the picture ({i // 2048}/{total}).")
-                if progress:
-                    progress(i // 2048 + 1, total)
-            ch.send(msg_close(handle))
-            ch.wait(0x02)
+            done = 0
+            for i, jpeg in enumerate(jpegs, start=1):
+                done = _send_file(ch, picture_name(i), jpeg, progress, done, total)
+            stale = [picture_name(i) for i in range(len(jpegs) + 1, MAX_PICTURES + 1)] + LEGACY_FILES
+            for n in stale:
+                ch.send(msg_remove_picture(n))
+                time.sleep(0.15)
             ch.send(msg_setting("screensaver.mode", "0"))  # off and on again makes the phone reread the folder
             time.sleep(1.0)
             ch.send(msg_setting("screensaver.mode", "1"))
             time.sleep(0.5)
         finally:
             ch.close()
-    return name
+    return len(jpegs)
 
 
 def remove_pictures(names, switch_to_system=False):
-    """Delete pictures (file names) from the phone's screensaver folder; optionally go back to the system screensavers."""
+    """Delete pictures (plain file names) from the phone's screensaver folder; optionally go back to the system ones."""
     with _lock:
         ch = Channel()
         try:
             for n in names:
                 ch.send(msg_remove_picture(n))
-                time.sleep(0.4)
+                time.sleep(0.15)
             if switch_to_system:
                 ch.send(msg_setting("screensaver.mode", "0"))
                 time.sleep(0.5)
@@ -240,6 +261,6 @@ def remove_pictures(names, switch_to_system=False):
             ch.close()
 
 
-def remove_my_picture():
-    """The picture Yea-Line sent: delete it and fall back to the system screensavers."""
-    remove_pictures([SAVER_FILE], switch_to_system=True)
+def remove_my_pictures():
+    """Every picture Yea-Line sent: delete them and fall back to the system screensavers."""
+    remove_pictures([picture_name(i) for i in range(1, MAX_PICTURES + 1)] + LEGACY_FILES, switch_to_system=True)
