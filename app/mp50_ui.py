@@ -12,7 +12,7 @@ import base64
 import ctypes
 import io
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 try:  # tell Windows we draw at the real resolution; otherwise it stretches the window and everything looks blurry
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -64,6 +64,7 @@ if "--log" not in sys.argv:  # keep a log next to the settings so problems can b
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mp50_audio as audio  # noqa: E402
 import mp50_buttons as m  # noqa: E402  (parses sys.argv on import)
+import mp50_phone as phone_screen  # noqa: E402
 import mp50_store as store  # noqa: E402
 import yea_assets as assets  # noqa: E402
 import yea_cred as cred  # noqa: E402
@@ -248,6 +249,12 @@ class App(tk.Tk):
         self.sd_enabled.trace_add("write", lambda *_: self._apply_speed())
         self.sd_prefix.trace_add("write", lambda *_: self._apply_speed())
         self._apply_speed(save=False)
+        ps = cfg.get("phone_screen", {})
+        self.pic_path = tk.StringVar(value=ps.get("picture", ""))
+        self.wait_var = tk.StringVar(value=ps.get("wait", ""))
+        self.wait_var.trace_add("write", lambda *_: self._save())
+        self._phone_msg = None  # (text, colour name), set by the worker threads and shown by _tick
+        self._pic_img = None
 
         self.dark = self._want_dark()
         self._build()
@@ -350,6 +357,7 @@ class App(tk.Tk):
                              "speed_dial": {"enabled": self.sd_enabled.get(), "prefix": self._sd_prefix(),
                                             "entries": {d: {"name": self.sd_name[d].get().strip(),
                                                             "number": self.sd_num[d].get().strip()} for d in "123456789"}},
+                             "phone_screen": {"picture": self.pic_path.get(), "wait": self.wait_var.get()},
                              "test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
                              "mic": m.ivr.mic or "", "theme": THEME_NAMES.get(self.theme_var.get(), "auto"),
                              "assist": {"url": self.ha_url.get().strip(), "pipeline": self.ha_pipeline.get().strip(),
@@ -657,6 +665,107 @@ class App(tk.Tk):
         self._label(row, "Theme").pack(side="left")
         ttk.Combobox(row, textvariable=self.theme_var, values=list(THEME_NAMES), state="readonly",
                      width=16, font=(FONT, 11)).pack(side="left", padx=10)
+        self._build_phone_screen(page)
+
+    # ---- the phone's own screen ----------------------------------------
+    def _build_phone_screen(self, page):
+        t = self.t
+        card = self._card(page, "PHONE SCREEN (USB ONLY)")
+        row = tk.Frame(card, bg=t["card"])
+        row.pack(fill="x", padx=16, pady=(8, 0))
+        self._label(row, "Screen style").pack(side="left")
+        ttk.Button(row, text="Light", command=lambda: self._phone_job("Setting light mode", phone_screen.set_dark, False)
+                   ).pack(side="left", padx=(10, 4))
+        ttk.Button(row, text="Dark", command=lambda: self._phone_job("Setting dark mode", phone_screen.set_dark, True)
+                   ).pack(side="left")
+
+        row = tk.Frame(card, bg=t["card"])
+        row.pack(fill="x", padx=16, pady=(12, 0))
+        self.pic_thumb = tk.Label(row, bg=t["input"], width=9, height=6, text="no\npicture", fg=t["muted"], font=(FONT, 9))
+        self.pic_thumb.pack(side="left")
+        col = tk.Frame(row, bg=t["card"])
+        col.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        self._label(col, "Screensaver picture").pack(anchor="w")
+        self.pic_name = self._label(col, "", muted=True, size=10, anchor="w")
+        self.pic_name.pack(fill="x", pady=(2, 6))
+        btns = tk.Frame(col, bg=t["card"])
+        btns.pack(anchor="w")
+        ttk.Button(btns, text="Choose picture...", command=self._pick_picture).pack(side="left")
+        ttk.Button(btns, text="Send to phone", style="Accent.TButton", command=self._send_picture).pack(side="left", padx=6)
+        ttk.Button(btns, text="Use system pictures", command=lambda: self._phone_job(
+            "Switching to the system screensavers", phone_screen.use_custom_screensaver, False)).pack(side="left")
+        self._show_picture(self.pic_path.get())
+
+        row = tk.Frame(card, bg=t["card"])
+        row.pack(fill="x", padx=16, pady=(12, 0))
+        self._label(row, "Screensaver starts after").pack(side="left")
+        combo = ttk.Combobox(row, textvariable=self.wait_var, values=list(phone_screen.WAIT_CHOICES), state="readonly",
+                             width=12, font=(FONT, 11))
+        combo.pack(side="left", padx=10)
+        combo.bind("<<ComboboxSelected>>", lambda e: self._phone_job(
+            "Setting the screensaver delay", phone_screen.set_screensaver_wait,
+            phone_screen.WAIT_CHOICES.get(self.wait_var.get(), 7200)))
+
+        self.phone_status = self._label(card, "", muted=True, size=10, anchor="w", wraplength=px(560), justify="left")
+        self.phone_status.pack(fill="x", padx=16, pady=(10, 0))
+        self._label(card, "Changes the phone's own screen over its USB cable, the way Yealink USB Connect does. Pictures are "
+                    "cropped to the phone's 288x480 screen. Close Yealink USB Connect first so the two do not fight.",
+                    muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(6, 14))
+
+    def _phone_job(self, text, fn, *args):
+        """Run a phone operation off the UI thread and report the result in the card."""
+        self._phone_msg = (text + "...", "muted")
+
+        def run():
+            try:
+                fn(*args)
+                self._phone_msg = (text.replace("Setting", "Set").replace("Switching", "Switched") + ": done.", "green")
+            except Exception as e:
+                self._phone_msg = (str(e) or "That did not work.", "red")
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_picture(self, path):
+        self.pic_name.configure(text=os.path.basename(path) if path else "None chosen")
+        self._pic_img = None
+        if not path or not os.path.exists(path):
+            self.pic_thumb.configure(image="", text="no\npicture", width=9, height=6)
+            return
+        try:
+            from PIL import Image, ImageOps
+            im = ImageOps.fit(ImageOps.exif_transpose(Image.open(path)).convert("RGB"), (px(60), px(100)))
+            buf = io.BytesIO()
+            im.save(buf, "PNG")
+            self._pic_img = tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
+            self.pic_thumb.configure(image=self._pic_img, text="", width=px(60), height=px(100))
+        except Exception:
+            self.pic_thumb.configure(image="", text="?", width=9, height=6)
+
+    def _pick_picture(self):
+        path = filedialog.askopenfilename(title="Choose a screensaver picture",
+                                          filetypes=[("Pictures", "*.jpg *.jpeg *.png *.bmp *.webp"), ("All files", "*.*")])
+        if path:
+            self.pic_path.set(path)
+            self._show_picture(path)
+            self._save()
+
+    def _send_picture(self):
+        path = self.pic_path.get()
+        if not path or not os.path.exists(path):
+            self._phone_msg = ("Choose a picture first.", "red")
+            return
+        self._phone_msg = ("Preparing the picture...", "muted")
+
+        def run():
+            try:
+                jpeg = phone_screen.prepare_picture(path)
+
+                def progress(i, n):
+                    self._phone_msg = (f"Sending the picture to the phone ({i}/{n})...", "muted")
+                phone_screen.upload_picture(jpeg, progress)
+                self._phone_msg = ("Picture sent. The phone shows it when it goes idle.", "green")
+            except Exception as e:
+                self._phone_msg = (str(e) or "Could not send the picture.", "red")
+        threading.Thread(target=run, daemon=True).start()
 
     # ---- Home Assistant Assist ----------------------------------------
     def _on_assist_number(self):
@@ -981,6 +1090,10 @@ class App(tk.Tk):
         self.after(100, self._poll)
 
     def _tick(self):
+        if self._phone_msg:
+            text, colour = self._phone_msg
+            self._phone_msg = None
+            self.phone_status.configure(text=text, fg=self.t[colour])
         self.level *= 0.8
         w = max(self.meter.winfo_width(), 1)
         self.meter.delete("all")
