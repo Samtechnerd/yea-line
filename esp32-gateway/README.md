@@ -3,8 +3,11 @@
 An ESP32 that pairs with the Yealink MP50 **over Bluetooth**, as if it were the phone's mobile, and turns what you dial into SIP calls
 on your PBX. No PC needed once it is set up.
 
-Status: calling a PBX extension and the built-in echo test worked on real hardware. Not done: incoming calls (the "Ring phone"
-button exists but was not verified end to end), pairing polish, DTMF forwarding, wideband audio.
+Status: parked. Dialling a PBX extension, the built-in echo test and **incoming calls** (the PBX rings the phone, you answer on the
+MP50) work on real hardware. Known problems: about 1.5 s of extra round-trip audio delay on top of the network, and the call sounds
+choppy ("bad signal"). The board's own audio queues were measured and are fine (the Bluetooth link runs at the right rate), so the
+delay is probably inside the MP50's Bluetooth handling or the network path; not yet isolated. Also not done: pairing polish, DTMF
+forwarding, wideband audio. The board logs audio statistics at the end of each call to help.
 
 ## Hardware
 

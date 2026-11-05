@@ -22,7 +22,7 @@ static int s_sip = -1, s_rtp = -1;
 static struct sockaddr_in s_srv;
 static sip_reg_t s_reg = SIP_UNREG;
 static volatile sip_call_t s_cs = SIPC_NONE;
-static volatile bool s_reconf, s_hangup_req;
+static volatile bool s_reconf, s_hangup_req, s_answer_req;
 static char s_ip[16];
 
 /* registration */
@@ -37,7 +37,8 @@ static struct {
     char callid[48], ftag[12], ttag[48], branch[28], num[32], target[96];
     char realm[64], nonce[96], opaque[64], qop[16];
     int cseq;
-    bool authed, answered;
+    bool authed, answered, incoming;
+    char i_via[500], i_from[200], i_to[200], i_cseq[40];  /* the INVITE we are answering */
     int64_t t_invite;
     int invite_tx;
     struct sockaddr_in rtp_to;
@@ -395,12 +396,129 @@ bool sip_call(const char *number)
 }
 
 void sip_hangup(void) { s_hangup_req = true; }
+bool sip_answer(void) { s_answer_req = true; return true; }
+
+/* ---------- incoming calls ---------- */
+static void parse_sdp(const char *m);
+static void reply(const struct sockaddr_in *to, const char *req, int code, const char *text, bool add_tag);
+
+static int build_sdp(char *sdp, size_t cap)
+{
+    return snprintf(sdp, cap,
+                    "v=0\r\no=- %u %u IN IP4 %s\r\ns=Yea-Line\r\nc=IN IP4 %s\r\nt=0 0\r\nm=audio %d RTP/AVP 0 101\r\n"
+                    "a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=ptime:20\r\na=sendrecv\r\n",
+                    (unsigned)esp_random(), (unsigned)esp_random(), s_ip, s_ip, RTP_PORT);
+}
+
+/* a response inside the incoming dialog (180, 200, 486, 487, 603, ...) */
+static void send_resp(int code, const char *text, bool with_sdp)
+{
+    char m[BUF], sdp[400] = "";
+    int sl = with_sdp ? build_sdp(sdp, sizeof(sdp)) : 0;
+    int n = snprintf(m, sizeof(m),
+                     "SIP/2.0 %d %s\r\n%sFrom: %s\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: %s\r\nContact: <sip:%s@%s:%d>\r\n"
+                     "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nUser-Agent: Yea-Line-ESP32\r\n%sContent-Length: %d\r\n\r\n%s",
+                     code, text, c.i_via, c.i_from, c.i_to, c.callid, c.i_cseq, g_cfg.sip_user, s_ip, SIP_PORT,
+                     with_sdp ? "Content-Type: application/sdp\r\n" : "", sl, sdp);
+    send_to(&s_srv, m, n);
+}
+
+static void handle_invite(const struct sockaddr_in *from, const char *m)
+{
+    char cid[48];
+    hget(m, "Call-ID", cid, sizeof(cid));
+    if (s_cs != SIPC_NONE) {
+        if (c.incoming && strcmp(cid, c.callid) == 0) {
+            char cs[40] = "";
+            hget(m, "CSeq", cs, sizeof(cs));
+            if (s_cs == SIPC_INRING && strcmp(cs, c.i_cseq) == 0) {  /* the PBX repeating the INVITE */
+                send_resp(180, "Ringing", false);
+            } else if (s_cs == SIPC_ACTIVE) {  /* re-INVITE inside the call: accept it and keep going */
+                strlcpy(c.i_cseq, cs, sizeof(c.i_cseq));
+                hcopy_all(m, "Via", c.i_via, sizeof(c.i_via));
+                parse_sdp(m);
+                send_resp(200, "OK", true);
+                gw_log("SIP: call updated by the PBX");
+            }
+            return;
+        }
+        reply(from, m, 486, "Busy Here", true);
+        gw_log("SIP: incoming call refused (busy)");
+        return;
+    }
+    memset(&c, 0, sizeof(c));
+    c.incoming = true;
+    c.cseq = 1;
+    strlcpy(c.callid, cid, sizeof(c.callid));
+    hcopy_all(m, "Via", c.i_via, sizeof(c.i_via));
+    hget(m, "From", c.i_from, sizeof(c.i_from));
+    hget(m, "To", c.i_to, sizeof(c.i_to));
+    hget(m, "CSeq", c.i_cseq, sizeof(c.i_cseq));
+    rnd_hex(c.ttag, 8);
+    if (!strstr(c.i_to, "tag=")) {
+        size_t l = strlen(c.i_to);
+        snprintf(c.i_to + l, sizeof(c.i_to) - l, ";tag=%s", c.ttag);
+    }
+    const char *u = strstr(c.i_from, "sip:");
+    if (u) sscanf(u + 4, "%31[^@;>]", c.num);
+    if (!c.num[0]) strlcpy(c.num, "unknown", sizeof(c.num));
+    char contact[120] = "";
+    if (hget(m, "Contact", contact, sizeof(contact))) {
+        char *a = strchr(contact, '<'), *b = a ? strchr(a, '>') : NULL;
+        if (a && b) {
+            *b = 0;
+            strlcpy(c.target, a + 1, sizeof(c.target));
+        }
+    }
+    parse_sdp(m);
+    {
+        const char *ml = strstr(m, "m=audio ");
+        char line[80] = "";
+        if (ml) sscanf(ml, "%79[^\r\n]", line);
+        gw_log("SIP: offer %s", line);
+    }
+    c.t_invite = now_ms();
+    s_cs = SIPC_INRING;
+    s_hangup_req = s_answer_req = false;
+    send_resp(100, "Trying", false);
+    send_resp(180, "Ringing", false);
+    gw_log("SIP: incoming call from %s", c.num);
+    app_post(EV_SIP_INCOMING, 0, c.num);
+}
+
+static void do_answer(void)
+{
+    s_answer_req = false;
+    if (s_cs != SIPC_INRING) return;
+    send_resp(200, "OK", true);
+    c.answered = true;
+    s_cs = SIPC_ACTIVE;
+    rtp_start();
+    gw_log("SIP: incoming call answered");
+    app_post(EV_SIP_CALL, 2, "");
+}
 
 static void do_hangup(void)
 {
     char m[BUF], uri[128];
     s_hangup_req = false;
     if (s_cs == SIPC_NONE) return;
+    if (c.incoming) {
+        if (s_cs == SIPC_INRING) {
+            send_resp(603, "Decline", false);
+            call_ended("rejected");
+            return;
+        }
+        snprintf(uri, sizeof(uri), "sip:%s@%s", c.num, g_cfg.sip_server);
+        int n = snprintf(m, sizeof(m),
+                         "BYE %s SIP/2.0\r\nVia: SIP/2.0/UDP %s:%d;branch=z9hG4bK%08x;rport\r\nMax-Forwards: 70\r\n"
+                         "From: %s\r\nTo: %s\r\nCall-ID: %s\r\nCSeq: %d BYE\r\nContent-Length: 0\r\n\r\n",
+                         c.target[0] ? c.target : uri, s_ip, SIP_PORT, (unsigned)esp_random(), c.i_to, c.i_from, c.callid,
+                         ++c.cseq);
+        send_to(&s_srv, m, n);
+        call_ended("hung up");
+        return;
+    }
     snprintf(uri, sizeof(uri), "sip:%s@%s", c.num, g_cfg.sip_server);
     if (!c.answered) {  /* CANCEL the ringing call, then wait for its 487 */
         int n = snprintf(m, sizeof(m),
@@ -542,19 +660,36 @@ static void reply(const struct sockaddr_in *to, const char *req, int code, const
 
 static void handle_request(const struct sockaddr_in *from, const char *m)
 {
+    if (strncmp(m, "OPTIONS ", 8) != 0 && strncmp(m, "ACK ", 4) != 0) {
+        char first[48] = "";
+        sscanf(m, "%47[^\r\n]", first);
+        gw_log("SIP rx %s (from %s)", first, inet_ntoa(from->sin_addr));
+    }
     if (strncmp(m, "OPTIONS ", 8) == 0) {
         reply(&s_srv, m, 200, "OK", true);   /* answer at the PBX's real address, not a public Via */
         if (from->sin_addr.s_addr != s_srv.sin_addr.s_addr) reply(from, m, 200, "OK", true);
     } else if (strncmp(m, "INVITE ", 7) == 0) {
-        reply(from, m, 486, "Busy Here", true);  /* incoming calls are not supported yet */
-        gw_log("SIP: incoming call refused (not supported yet)");
+        handle_invite(from, m);
+    } else if (strncmp(m, "CANCEL ", 7) == 0) {
+        char cid[80];
+        hget(m, "Call-ID", cid, sizeof(cid));
+        reply(&s_srv, m, 200, "OK", false);
+        if (s_cs == SIPC_INRING && strstr(cid, c.callid)) {
+            send_resp(487, "Request Terminated", false);
+            call_ended("missed");
+        }
     } else if (strncmp(m, "BYE ", 4) == 0) {
         char cid[80];
         hget(m, "Call-ID", cid, sizeof(cid));
         reply(&s_srv, m, 200, "OK", false);
         if (from->sin_addr.s_addr != s_srv.sin_addr.s_addr) reply(from, m, 200, "OK", false);
-        if (s_cs != SIPC_NONE && strstr(cid, c.callid)) call_ended("remote hung up");
-    } else if (strncmp(m, "NOTIFY ", 7) == 0 || strncmp(m, "MESSAGE ", 8) == 0) {
+        if (s_cs != SIPC_NONE && strstr(cid, c.callid)) {
+            char rs[100] = "";
+            hget(m, "Reason", rs, sizeof(rs));
+            gw_log("SIP: BYE %lld ms after the call arrived %s", (long long)(now_ms() - c.t_invite), rs);
+            call_ended("remote hung up");
+        }
+    } else if (strncmp(m, "NOTIFY ", 7) == 0 || strncmp(m, "MESSAGE ", 8) == 0 || strncmp(m, "UPDATE ", 7) == 0) {
         reply(from, m, 200, "OK", false);
     }
 }
@@ -598,7 +733,12 @@ static void sip_task(void *arg)
                 send_register(NULL);
             }
         }
+        if (s_answer_req) do_answer();
         if (s_hangup_req) do_hangup();
+        if (s_cs == SIPC_INRING && now_ms() - c.t_invite > 45000) {
+            send_resp(480, "Temporarily Unavailable", false);
+            call_ended("no answer");
+        }
         if (s_cs == SIPC_CALLING && !c.authed && c.invite_tx < 4 && now_ms() - c.t_invite > 700) send_invite(NULL);
         if (s_cs == SIPC_CALLING && now_ms() - c.t_invite > 30000) call_ended("no answer");
 

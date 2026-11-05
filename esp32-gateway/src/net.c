@@ -97,7 +97,7 @@ static const char PAGE[] =
 "<input name=ssid id=ssid placeholder='Network name' style='display:none;margin-top:6px' autocomplete=off>"
 "<label>Wi-Fi password</label><div class=pw><input name=wpass id=wpass type=password placeholder='(leave empty to keep)' autocomplete=off>"
 "<button type=button class=ic onclick=\"eye('wpass')\" title=Show><svg width=18 height=18 viewBox='0 0 24 24' fill=none stroke=currentColor stroke-width=2><path d='M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z'/><circle cx=12 cy=12 r=3 /></svg></button></div>"
-"<label>PBX address</label><input name=sipsrv id=sipsrv placeholder='192.168.1.10'>"
+"<label>PBX address</label><input name=sipsrv id=sipsrv placeholder='192.168.2.85'>"
 "<label>PBX port</label><input name=sipport id=sipport>"
 "<label>Extension (user name)</label><input name=sipuser id=sipuser autocomplete=off>"
 "<label>Extension secret</label><div class=pw><input name=sippass id=sippass type=password placeholder='(leave empty to keep)' autocomplete=off>"
@@ -151,8 +151,9 @@ static esp_err_t h_status(httpd_req_t *r)
     json_str(logj, sizeof(logj), log);
     if (s_connected) snprintf(wifi, sizeof(wifi), "%s (%s)", g_cfg.wifi_ssid, s_ip);
     else snprintf(wifi, sizeof(wifi), s_ap_on ? "setup network on" : "connecting...");
-    snprintf(out, sizeof(out), "{\"wifi\":\"%s\",\"sip\":\"%s\",\"bt\":\"%s\",\"call\":\"%s\",\"log\":\"%s\"}", wifi,
-             sip_reg_str(), bt_state_str(), call_state_str(), logj);
+    snprintf(out, sizeof(out), "{\"wifi\":\"%s\",\"sip\":\"%s\",\"bt\":\"%s\",\"call\":\"%s\",\"heap\":%u,\"heapmin\":%u,\"log\":\"%s\"}", wifi,
+             sip_reg_str(), bt_state_str(), call_state_str(), (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(), logj);
     httpd_resp_set_type(r, "application/json");
     return httpd_resp_send(r, out, HTTPD_RESP_USE_STRLEN);
 }

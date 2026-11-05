@@ -16,6 +16,19 @@
 static esp_bd_addr_t s_peer;
 static bool s_have_peer, s_slc, s_audio, s_stack_ready;
 static volatile int s_pair_secs;
+/* the call as the phone should see it (answers AT+CIND and AT+CLCC): indicators, plus one call-list entry */
+static int s_ind_call, s_ind_setup, s_cl_on, s_cl_dir, s_cl_stat;
+static char s_cl_num[32];
+
+static void set_call(int call, int setup, int listed, int dir, int stat, const char *num)
+{
+    s_ind_call = call;
+    s_ind_setup = setup;
+    s_cl_on = listed;
+    s_cl_dir = dir;
+    s_cl_stat = stat;
+    strlcpy(s_cl_num, num ? num : "", sizeof(s_cl_num));
+}
 static const char *s_state = "starting";
 
 bool bt_slc_up(void) { return s_slc; }
@@ -114,17 +127,19 @@ static void hf_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *p)
         esp_hf_ag_unknown_at_send(p->unat_rep.remote_addr, NULL);
         break;
     case ESP_HF_IND_UPDATE_EVT:
+        gw_log("Phone asked for call indicators");
         esp_hf_ag_ciev_report(p->ind_upd.remote_addr, ESP_HF_IND_TYPE_SERVICE, 1);
         esp_hf_ag_ciev_report(p->ind_upd.remote_addr, ESP_HF_IND_TYPE_SIGNAL, 5);
         esp_hf_ag_ciev_report(p->ind_upd.remote_addr, ESP_HF_IND_TYPE_BATTCHG, 5);
         break;
     case ESP_HF_CIND_RESPONSE_EVT:
-        esp_hf_ag_cind_response(p->cind_rep.remote_addr, 0, 0, 1, 5, 0, 5, 0);
+        esp_hf_ag_cind_response(p->cind_rep.remote_addr, s_ind_call, s_ind_setup, 1, 5, 0, 5, 0);
         break;
     case ESP_HF_COPS_RESPONSE_EVT:
         esp_hf_ag_cops_response(p->cops_rep.remote_addr, "Yea-Line");
         break;
     case ESP_HF_CLCC_RESPONSE_EVT:
+        if (s_cl_on) esp_hf_ag_clcc_response(p->clcc_rep.remote_addr, 1, s_cl_dir, s_cl_stat, 0, 0, s_cl_num, 129);
         esp_hf_ag_clcc_response(p->clcc_rep.remote_addr, 0, 0, 0, 0, 0, NULL, 0);
         break;
     case ESP_HF_CNUM_RESPONSE_EVT:
@@ -150,6 +165,7 @@ static void hf_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *p)
         gw_log("Phone sent tone: %s", p->vts_rep.code);
         break;
     default:
+        gw_log("Bluetooth hands-free event %d", (int)event);
         break;
     }
 }
@@ -157,37 +173,49 @@ static void hf_cb(esp_hf_cb_event_t event, esp_hf_cb_param_t *p)
 /* ---- call state shown on the phone ---- */
 void bt_call_dialing(const char *num)
 {
+    set_call(0, 2, 1, 0, 2, num);
     if (s_slc) esp_hf_ag_out_call(s_peer, 0, 0, ESP_HF_CALL_STATUS_NO_CALLS, ESP_HF_CALL_SETUP_STATUS_OUTGOING_DIALING, (char *)num, 0);
 }
 
 void bt_call_alerting(const char *num)
 {
+    set_call(0, 3, 1, 0, 3, num);
     if (s_slc) esp_hf_ag_out_call(s_peer, 0, 0, ESP_HF_CALL_STATUS_NO_CALLS, ESP_HF_CALL_SETUP_STATUS_OUTGOING_ALERTING, (char *)num, 0);
 }
 
 void bt_call_active(const char *num)
 {
+    set_call(1, 0, 1, 0, 0, num);
     if (s_slc) esp_hf_ag_out_call(s_peer, 1, 0, ESP_HF_CALL_STATUS_CALL_IN_PROGRESS, ESP_HF_CALL_SETUP_STATUS_IDLE, (char *)num, 0);
 }
 
 void bt_call_end(const char *num)
 {
+    set_call(0, 0, 0, 0, 0, "");
     if (s_slc) esp_hf_ag_end_call(s_peer, 0, 0, 0, 0, (char *)num, 0);
 }
 
 void bt_ring(const char *caller)
 {
+    set_call(0, 1, 1, 1, 4, caller);
     if (s_slc) esp_hf_ag_answer_call(s_peer, 0, 0, ESP_HF_CALL_STATUS_NO_CALLS, ESP_HF_CALL_SETUP_STATUS_INCOMING, (char *)caller, 0);
 }
 
 void bt_ring_answered(const char *caller)
 {
+    set_call(1, 0, 1, 1, 0, caller);
     if (s_slc) esp_hf_ag_answer_call(s_peer, 1, 0, ESP_HF_CALL_STATUS_CALL_IN_PROGRESS, ESP_HF_CALL_SETUP_STATUS_IDLE, (char *)caller, 0);
 }
 
 void bt_ring_stop(const char *caller)
 {
+    set_call(0, 0, 0, 0, 0, "");
     if (s_slc) esp_hf_ag_reject_call(s_peer, 0, 0, 0, 0, (char *)caller, 0);
+}
+
+void bt_audio_connect(void)
+{
+    if (s_slc && !s_audio) esp_hf_ag_audio_connect(s_peer);
 }
 
 static void link_task(void *arg)

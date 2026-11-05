@@ -34,6 +34,7 @@ typedef enum {
     EV_SIP_REG,     /* value: sip_reg_t */
     EV_SIP_CALL,    /* value: 1 ringing, 2 answered, 0 ended; text: reason */
     EV_RING,        /* web page: ring the phone */
+    EV_SIP_INCOMING, /* text: caller number */
 } app_evt_type_t;
 
 typedef struct {
@@ -63,6 +64,7 @@ void bt_forget(void);
 void bt_ring(const char *caller);
 void bt_ring_answered(const char *caller);
 void bt_ring_stop(const char *caller);
+void bt_audio_connect(void);
 
 /* ---- audio plumbing between Bluetooth SCO and the network ---- */
 void audio_init(void);
@@ -78,13 +80,14 @@ int16_t ulaw2lin(uint8_t u);
 
 /* ---- SIP ---- */
 typedef enum { SIP_UNREG, SIP_REGISTERING, SIP_REGISTERED, SIP_FAILED } sip_reg_t;
-typedef enum { SIPC_NONE, SIPC_CALLING, SIPC_RINGING, SIPC_ACTIVE } sip_call_t;
+typedef enum { SIPC_NONE, SIPC_CALLING, SIPC_RINGING, SIPC_ACTIVE, SIPC_INRING } sip_call_t;
 void sip_start(void);
 sip_reg_t sip_reg_state(void);
 sip_call_t sip_call_state(void);
 const char *sip_reg_str(void);
 bool sip_call(const char *number);
 void sip_hangup(void);
+bool sip_answer(void);
 void sip_reconfigure(void);
 
 /* ---- call manager ---- */

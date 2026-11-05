@@ -10,7 +10,8 @@
 #include "esp_timer.h"
 #include "gw.h"
 
-typedef enum { CS_IDLE, CS_DIAL, CS_SIP, CS_ECHO, CS_RING } cstate_t;
+typedef enum { CS_IDLE, CS_DIAL, CS_SIP, CS_ECHO, CS_RING, CS_INCOMING } cstate_t;
+static int64_t s_audio_chk_ms;
 static int64_t s_ring_until_ms;
 static cstate_t s_state = CS_IDLE;
 static char s_num[32];
@@ -24,6 +25,7 @@ const char *call_state_str(void)
     case CS_SIP: return "in a call";
     case CS_ECHO: return "echo test";
     case CS_RING: return "ringing the phone";
+    case CS_INCOMING: return "incoming call";
     default: return "idle";
     }
 }
@@ -75,6 +77,25 @@ static void echo_task(void *arg)
 
 static void echo_stop(void) { s_echo_run = false; }
 
+/* in-band ring tone: some phones ring from audio sent over the Bluetooth link instead of from the RING message */
+static volatile bool s_ringtone_on;
+static void ringtone_task(void *arg)
+{
+    int16_t blk[160];
+    int n = 0;
+    s_ringtone_on = true;
+    /* 0.4 s on, 0.2 s off, 0.4 s on, 2 s off (20 ms frames) */
+    for (int f = 0; s_state == CS_INCOMING && bt_slc_up(); f = (f + 1) % 150) {
+        bool on = f < 20 || (f >= 30 && f < 50);
+        for (int i = 0; i < 160; i++, n++)
+            blk[i] = on ? (int16_t)(5000 * (sinf(6.2831853f * 400 * n / 8000.0f) + sinf(6.2831853f * 450 * n / 8000.0f))) : 0;
+        if (bt_audio_up()) audio_to_bt(blk, 160);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    s_ringtone_on = false;
+    vTaskDelete(NULL);
+}
+
 static void start_echo(void)
 {
     s_state = CS_ECHO;
@@ -85,6 +106,12 @@ static void start_echo(void)
 static void end_all(bool tell_phone)
 {
     echo_stop();
+    if (s_state == CS_INCOMING) {
+        sip_hangup();  /* rejects the call at the PBX */
+        bt_ring_stop(s_num);
+        s_state = CS_IDLE;
+        return;
+    }
     if (s_state == CS_RING) {
         bt_ring_stop(s_num);
         s_state = CS_IDLE;
@@ -121,6 +148,10 @@ static void on_event(const app_evt_t *e)
         } else if (e->value == 2 && s_state == CS_DIAL) {
             s_state = CS_SIP;
             bt_call_active(s_num);
+        } else if (e->value == 0 && s_state == CS_INCOMING) {
+            gw_log("Caller hung up before answer");
+            bt_ring_stop(s_num);
+            s_state = CS_IDLE;
         } else if (e->value == 0 && (s_state == CS_DIAL || s_state == CS_SIP)) {
             bt_call_end(s_num);
             s_state = CS_IDLE;
@@ -145,15 +176,33 @@ static void on_event(const app_evt_t *e)
             bt_ring(s_num);
         }
         break;
+    case EV_SIP_INCOMING:
+        if (s_state != CS_IDLE || !bt_slc_up()) {
+            gw_log("Incoming call from %s refused: %s", e->text, s_state != CS_IDLE ? "busy" : "the phone is not connected");
+            sip_hangup();
+        } else {
+            strlcpy(s_num, e->text, sizeof(s_num));
+            s_state = CS_INCOMING;
+            gw_log("Ringing the phone: incoming call from %s", s_num);
+            bt_ring(s_num);
+            if (!s_ringtone_on) xTaskCreate(ringtone_task, "ringtone", 4096, NULL, 4, NULL);
+        }
+        break;
     case EV_BT_ANSWER:
-        if (s_state == CS_RING) {
+        if (s_state == CS_INCOMING) {
+            gw_log("Phone answered the incoming call");
+            sip_answer();
+            bt_ring_answered(s_num);
+            s_state = CS_SIP;
+            s_audio_chk_ms = esp_timer_get_time() / 1000 + 1500;
+        } else if (s_state == CS_RING) {
             gw_log("Phone answered - echo test");
             bt_ring_answered(s_num);
             start_echo();
         }
         break;
     case EV_BT_AUDIO:
-        if (e->value == 0 && s_state != CS_IDLE) end_all(false);
+        if (e->value == 0 && s_state != CS_IDLE && s_state != CS_INCOMING) end_all(false);
         break;
     case EV_BT_SLC:
         if (e->value == 0 && s_state != CS_IDLE) end_all(false);
@@ -168,6 +217,13 @@ static void app_task(void *arg)
     app_evt_t e;
     for (;;) {
         if (xQueueReceive(s_q, &e, pdMS_TO_TICKS(500))) on_event(&e);
+        if (s_audio_chk_ms && esp_timer_get_time() / 1000 > s_audio_chk_ms) {
+            s_audio_chk_ms = 0;
+            if (s_state == CS_SIP && !bt_audio_up()) {
+                gw_log("Opening the call audio link");
+                bt_audio_connect();
+            }
+        }
         if (s_state == CS_RING && esp_timer_get_time() / 1000 > s_ring_until_ms) {
             gw_log("Ring timed out (no answer)");
             end_all(false);

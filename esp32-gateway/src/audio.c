@@ -19,6 +19,13 @@ static esp_timer_handle_t s_timer;
 static SemaphoreHandle_t s_tick;
 static TaskHandle_t s_pump;
 static volatile bool s_up;
+static volatile uint32_t s_drops, s_gaps, s_blocks;
+static volatile bool s_seen, s_playing;
+static volatile uint32_t s_cb_len, s_in_bytes, s_in_drop, s_out_calls, s_ticks;
+static int64_t s_t_up;
+
+#define PREBUF 640    /* start playing once 40 ms is queued */
+#define HIGH_WATER 3200  /* more than 200 ms queued: skip ahead */
 
 void audio_init(void)
 {
@@ -29,6 +36,7 @@ void audio_init(void)
 
 static void tick_cb(void *arg)
 {
+    s_ticks++;
     xSemaphoreGive(s_tick);
 }
 
@@ -49,6 +57,10 @@ void audio_bt_up(void)
         return;
     }
     audio_flush();
+    s_drops = s_gaps = s_blocks = 0;
+    s_seen = s_playing = false;
+    s_in_bytes = s_in_drop = s_out_calls = s_ticks = 0;
+    s_t_up = esp_timer_get_time();
     esp_hf_ag_register_data_callback(audio_in_cb, audio_out_cb);
     s_up = true;
     const esp_timer_create_args_t a = {.callback = tick_cb, .name = "sco"};
@@ -63,6 +75,17 @@ void audio_bt_down(void)
         return;
     }
     s_up = false;
+    {
+        float secs = (esp_timer_get_time() - s_t_up) / 1e6f;
+        if (secs > 1) {
+            gw_log("Audio link %.0f s: phone mic %.0f bytes/s (%u lost), speaker asked %.0f times/s, timer ticks %.0f/s",
+                   secs, s_in_bytes / secs, (unsigned)s_in_drop, s_out_calls / secs, s_ticks / secs);
+        }
+    }
+    if (s_blocks) {
+        gw_log("Audio: %u blocks from the network, %u skipped (too much queued), %u gaps (ran dry), %u bytes per Bluetooth block",
+               (unsigned)s_blocks, (unsigned)s_drops, (unsigned)s_gaps, (unsigned)s_cb_len);
+    }
     if (s_timer) {
         esp_timer_stop(s_timer);
         esp_timer_delete(s_timer);
@@ -74,15 +97,27 @@ void audio_bt_down(void)
 uint32_t audio_out_cb(uint8_t *buf, uint32_t len)
 {
     size_t got = 0;
+    s_cb_len = len;
+    s_out_calls++;
     if (s_to_bt) {
-        uint8_t *d = xRingbufferReceiveUpTo(s_to_bt, &got, 0, len);
-        if (d) {
-            memcpy(buf, d, got);
+        size_t queued = RB_SIZE - xRingbufferGetCurFreeSize(s_to_bt);
+        if (!s_playing && queued >= PREBUF) s_playing = true;
+        while (s_playing && got < len) {  /* the ring can hand back a short piece at its end: ask again */
+            size_t n = 0;
+            uint8_t *d = xRingbufferReceiveUpTo(s_to_bt, &n, 0, len - got);
+            if (!d) break;
+            memcpy(buf + got, d, n);
             vRingbufferReturnItem(s_to_bt, d);
+            got += n;
         }
+        if (s_playing && got < len) {
+            s_playing = false;  /* ran dry: wait until a little has built up again instead of stuttering */
+            if (s_seen) s_gaps++;
+        }
+        if (got) s_seen = true;
     }
     if (got < len) {
-        memset(buf + got, 0, len - got);  /* underrun: silence */
+        memset(buf + got, 0, len - got);
     }
     return len;
 }
@@ -90,13 +125,26 @@ uint32_t audio_out_cb(uint8_t *buf, uint32_t len)
 void audio_in_cb(const uint8_t *buf, uint32_t len)
 {
     if (s_from_bt) {
-        xRingbufferSend(s_from_bt, buf, len, 0);  /* full: drop */
+        s_in_bytes += len;
+        if (xRingbufferSend(s_from_bt, buf, len, 0) != pdTRUE) s_in_drop++;  /* full: drop */
     }
 }
 
 void audio_to_bt(const int16_t *pcm, int n)
 {
     if (s_to_bt && s_up) {
+        s_blocks++;
+        if (RB_SIZE - xRingbufferGetCurFreeSize(s_to_bt) > HIGH_WATER) {
+            s_drops++;  /* far too much queued: throw away the oldest audio to catch up */
+            size_t got = 0;
+            for (int i = 0; i < 4 && got < 1280; i++) {
+                size_t m = 0;
+                void *d = xRingbufferReceiveUpTo(s_to_bt, &m, 0, 1280 - got);
+                if (!d) break;
+                vRingbufferReturnItem(s_to_bt, d);
+                got += m;
+            }
+        }
         xRingbufferSend(s_to_bt, pcm, n * 2, 0);
     }
 }
