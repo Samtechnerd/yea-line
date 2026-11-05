@@ -30,15 +30,18 @@ def out(line):
 
 
 listeners = []  # callbacks fn(kind, data) for UIs: pickup, hangup, bot_start, bot_stop, bot_done
-speed_dial = {"enabled": False, "entries": {}, "names": {}}  # filled in by the UI: *1..*9 -> a saved number
+speed_dial = {"enabled": False, "prefix": "*", "entries": {}, "names": {}}  # filled in by the UI: <prefix>1..9 -> a saved number
 
 
 def resolve_speed(number):
-    """With speed dial on, *1 .. *9 become the saved number; anything else is left alone."""
-    if speed_dial["enabled"] and len(number) == 2 and number[0] == "*" and number[1] in "123456789":
-        target = speed_dial["entries"].get(number[1], "").strip()
+    """With speed dial on, <prefix>1 .. <prefix>9 (prefix * or #, or none = a single digit) become the saved
+    number; anything else is left alone."""
+    pre = speed_dial.get("prefix", "*")
+    if speed_dial["enabled"] and len(number) == len(pre) + 1 and number.startswith(pre) and number[-1] in "123456789":
+        digit = number[-1]
+        target = speed_dial["entries"].get(digit, "").strip()
         if target:
-            who = speed_dial["names"].get(number[1], "") or target
+            who = speed_dial["names"].get(digit, "") or target
             out(f"  (speed dial {number} -> {who})")
             return target
     return number

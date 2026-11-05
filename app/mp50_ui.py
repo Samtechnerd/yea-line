@@ -74,6 +74,7 @@ DARK = dict(bg="#0f172a", card="#1e293b", text="#f1f5f9", muted="#94a3b8", borde
             btn="#334155", accent="#3b82f6", grey="#64748b", green="#22c55e", red="#ef4444")
 FONT = "Segoe UI"
 THEME_NAMES = {"Follow Windows": "auto", "Light": "light", "Dark": "dark"}
+SD_PREFIX_NAMES = {"*": "Star (*)", "#": "Hash (#)", "": "None (single digit)"}
 
 events = queue.Queue()
 _orig_out = m.out
@@ -235,6 +236,8 @@ class App(tk.Tk):
         self.startup_var.trace_add("write", lambda *_: self._on_startup_toggle())
         sd = cfg.get("speed_dial", {})
         self.sd_enabled = tk.BooleanVar(value=bool(sd.get("enabled")))
+        self.sd_prefix = tk.StringVar(value=SD_PREFIX_NAMES.get(sd.get("prefix", "*"), SD_PREFIX_NAMES["*"]))
+        self.sd_prefix_lbls = []
         self.sd_name, self.sd_num = {}, {}
         for d in "123456789":
             e = (sd.get("entries") or {}).get(d, {})
@@ -243,6 +246,7 @@ class App(tk.Tk):
             self.sd_name[d].trace_add("write", lambda *_: self._apply_speed())
             self.sd_num[d].trace_add("write", lambda *_: self._apply_speed())
         self.sd_enabled.trace_add("write", lambda *_: self._apply_speed())
+        self.sd_prefix.trace_add("write", lambda *_: self._apply_speed())
         self._apply_speed(save=False)
 
         self.dark = self._want_dark()
@@ -279,11 +283,18 @@ class App(tk.Tk):
 
     # ---- tray, startup, speed dial ------------------------------------
     def _apply_speed(self, save=True):
+        pre = self._sd_prefix()
         m.speed_dial["enabled"] = self.sd_enabled.get()
+        m.speed_dial["prefix"] = pre
+        for d, lbl in self.sd_prefix_lbls:
+            lbl.config(text=pre + d)
         m.speed_dial["entries"] = {d: self.sd_num[d].get().strip() for d in "123456789"}
         m.speed_dial["names"] = {d: self.sd_name[d].get().strip() for d in "123456789"}
         if save:
             self._save()
+
+    def _sd_prefix(self):
+        return {v: k for k, v in SD_PREFIX_NAMES.items()}.get(self.sd_prefix.get(), "*")
 
     def _on_startup_toggle(self):
         try:
@@ -336,7 +347,7 @@ class App(tk.Tk):
     # ---- settings -----------------------------------------------------
     def _save(self):
         store.save_settings({"run_in_background": self.bg_var.get(),
-                             "speed_dial": {"enabled": self.sd_enabled.get(),
+                             "speed_dial": {"enabled": self.sd_enabled.get(), "prefix": self._sd_prefix(),
                                             "entries": {d: {"name": self.sd_name[d].get().strip(),
                                                             "number": self.sd_num[d].get().strip()} for d in "123456789"}},
                              "test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
@@ -613,17 +624,26 @@ class App(tk.Tk):
                     muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(4, 14))
 
         card = self._card(page, "SPEED DIAL (OPTIONAL)")
-        self._check(card, "Dial *1 to *9 on the phone to call a saved number", self.sd_enabled).pack(fill="x", padx=16, pady=(8, 0))
+        self._check(card, "Dial a speed dial key on the phone to call a saved number", self.sd_enabled).pack(fill="x", padx=16, pady=(8, 0))
+        row = tk.Frame(card, bg=t["card"])
+        row.pack(fill="x", padx=16, pady=(8, 0))
+        self._label(row, "Dial key").pack(side="left")
+        ttk.Combobox(row, textvariable=self.sd_prefix, values=list(SD_PREFIX_NAMES.values()), state="readonly",
+                     width=24, font=(FONT, 11)).pack(side="left", padx=10)
+        self.sd_prefix_lbls = []
         grid = tk.Frame(card, bg=t["card"])
         grid.pack(fill="x", padx=16, pady=(6, 0))
         grid.columnconfigure(1, weight=1)
         self._label(grid, "Name (optional)", muted=True, size=10).grid(row=0, column=1, sticky="w", padx=(12, 0))
         self._label(grid, "Number", muted=True, size=10).grid(row=0, column=2, sticky="w", padx=(12, 0))
         for r, d in enumerate("123456789", start=1):
-            self._label(grid, "*" + d, bold=True).grid(row=r, column=0, sticky="w", pady=3)
+            lbl = self._label(grid, self._sd_prefix() + d, bold=True)
+            lbl.grid(row=r, column=0, sticky="w", pady=3)
+            self.sd_prefix_lbls.append((d, lbl))
             self._entry(grid, self.sd_name[d], font=(FONT, 11)).grid(row=r, column=1, sticky="ew", padx=(12, 0), pady=3, ipady=3)
             self._entry(grid, self.sd_num[d], width=14, font=(FONT, 11)).grid(row=r, column=2, padx=(12, 0), pady=3, ipady=3)
-        self._label(card, "Press * then a digit on the phone and pick up. Digits you leave empty dial normally.",
+        self._label(card, "Dial the key shown, then the digit, on the phone and pick up. With None, dial just the single digit. "
+                    "Digits you leave empty dial normally.",
                     muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(6, 14))
 
         card = self._card(page, "DIAL COMMAND (OPTIONAL)")
