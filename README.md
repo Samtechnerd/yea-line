@@ -28,6 +28,9 @@ firewall: allow it (SIP replies need to come back to the app).
 
 Then plug in the MP50 over USB, open **Settings**, enter your PBX address, extension and secret, and press *Save & connect*.
 
+Windows may show an *unknown publisher* or SmartScreen warning: click **More info**, then **Run anyway**. Releases are being moved to
+signed builds, see [CODE_SIGNING.md](CODE_SIGNING.md).
+
 ## Run from source
 
 Python 3.13+ on Windows:
@@ -74,6 +77,8 @@ hook and keypad reports, and sends indicator reports back (off-hook, ring) so th
 research scripts are in [tools](tools).
 
 ## License
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by the [SignPath Foundation](https://signpath.org).
 
 GPL-3.0, see [LICENSE](LICENSE). Yea-Line uses [pyVoIP](https://github.com/tayler6000/pyVoIP) (GPL-3.0). Other libraries:
 miniaudio (MIT), websocket-client (Apache-2.0), audioop-lts (PSF-2.0), Pillow (MIT-CMU). The ESP32 firmware uses Espressif's ESP-IDF

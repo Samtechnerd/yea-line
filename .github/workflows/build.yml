@@ -1,0 +1,51 @@
+# Builds the installer on GitHub's servers, so a signed file can be traced back to this source code.
+# Signing (SignPath Foundation) switches on once the repository variable SIGNPATH_ORGANIZATION_ID is set
+# and the secret SIGNPATH_API_TOKEN exists. Until then this just builds an unsigned installer.
+name: Build installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pyinstaller
+          choco install innosetup --no-progress -y
+      - name: Build
+        shell: pwsh
+        run: powershell -File packaging/build.ps1
+      - name: Upload unsigned installer
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-unsigned
+          path: installer-out/Yea-Line-Setup.exe
+
+      - name: Sign with SignPath
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: yea-line
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - name: Upload signed installer
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-signed
+          path: signed/Yea-Line-Setup.exe
