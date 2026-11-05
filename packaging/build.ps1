@@ -1,14 +1,13 @@
 # Builds dist\Yea-Line\Yea-Line.exe with PyInstaller, then installer-out\Yea-Line-Setup.exe with Inno Setup.
 # Run from the repository root:  powershell -File packaging\build.ps1
+# (The logo is embedded in app\yea_assets.py; regenerate it with:  cd app; python make_logo.py)
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-$data = @("app\yealine.ico") + (Get-ChildItem app\yealine_hdr_*.png | ForEach-Object { "app\" + $_.Name })
-$addData = $data | ForEach-Object { "--add-data"; "$_;." }
-
 python -m PyInstaller --noconfirm --clean --windowed --name Yea-Line --icon app\yealine.ico `
-    --paths app @addData --collect-submodules pyVoIP --hidden-import audioop --hidden-import miniaudio `
-    --hidden-import websocket app\mp50_ui.py
+    --paths app --collect-submodules pyVoIP --collect-submodules pystray `
+    --hidden-import audioop --hidden-import miniaudio --hidden-import websocket --hidden-import pystray._win32 `
+    app\mp50_ui.py
 
 $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
           "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1

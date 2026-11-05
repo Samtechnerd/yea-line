@@ -30,6 +30,19 @@ def out(line):
 
 
 listeners = []  # callbacks fn(kind, data) for UIs: pickup, hangup, bot_start, bot_stop, bot_done
+speed_dial = {"enabled": False, "entries": {}, "names": {}}  # filled in by the UI: *1..*9 -> a saved number
+
+
+def resolve_speed(number):
+    """With speed dial on, *1 .. *9 become the saved number; anything else is left alone."""
+    if speed_dial["enabled"] and len(number) == 2 and number[0] == "*" and number[1] in "123456789":
+        target = speed_dial["entries"].get(number[1], "").strip()
+        if target:
+            who = speed_dial["names"].get(number[1], "") or target
+            out(f"  (speed dial {number} -> {who})")
+            return target
+    return number
+
 
 
 def emit(kind, **data):
@@ -210,6 +223,7 @@ class Decoder:
         self.on_hangup()
 
     def on_pickup(self, number):
+        number = resolve_speed(number)
         if not number and not _ringing and not sip.pending:
             # picked up without dialling or an incoming ring: nothing happens, so don't report a call
             out(f"{time.strftime('%H:%M:%S')}  >> pick up with no number (ignored)")

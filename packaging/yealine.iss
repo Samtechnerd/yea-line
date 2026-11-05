@@ -1,7 +1,7 @@
 ; Yea-Line installer (Inno Setup 6). Per-user install: no administrator rights needed.
 ; Build the app first (packaging\build.ps1 does both steps).
 #define AppName "Yea-Line"
-#define AppVersion "1.0.0"
+#define AppVersion "1.1.0"
 #define AppExe "Yea-Line.exe"
 
 [Setup]
@@ -29,7 +29,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
-Name: "startup"; Description: "Start {#AppName} when I sign in to Windows"; GroupDescription: "Startup:"; Flags: unchecked
+Name: "startup"; Description: "Start {#AppName} when I sign in to Windows (hidden in the tray)"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
 Source: "..\dist\Yea-Line\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -37,7 +37,10 @@ Source: "..\dist\Yea-Line\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: startup
+
+[Registry]
+; same value the app's own "start with Windows" checkbox writes, so the two stay in step
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExe}"" --hidden"; Tasks: startup; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent

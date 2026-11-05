@@ -8,7 +8,9 @@ import queue
 import sys
 import threading
 import time
+import base64
 import ctypes
+import io
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -50,6 +52,9 @@ for _cls, _names in ((tk.Pack, ("pack_configure", "pack")), (tk.Grid, ("grid_con
     for _n in _names:
         setattr(_cls, _n, _scaled(getattr(_cls, _n)))
 
+HIDDEN = "--hidden" in sys.argv  # start in the system tray (used when Windows starts it at sign-in)
+if HIDDEN:
+    sys.argv.remove("--hidden")
 if "--quiet" not in sys.argv:
     sys.argv.append("--quiet")
 if "--log" not in sys.argv:  # keep a log next to the settings so problems can be diagnosed later
@@ -60,6 +65,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mp50_audio as audio  # noqa: E402
 import mp50_buttons as m  # noqa: E402  (parses sys.argv on import)
 import mp50_store as store  # noqa: E402
+import yea_assets as assets  # noqa: E402
 import yea_cred as cred  # noqa: E402
 
 LIGHT = dict(bg="#f4f5f7", card="#ffffff", text="#1c1e21", muted="#6b7280", border="#e5e7eb", input="#f3f4f6",
@@ -97,13 +103,89 @@ def fmt_time(seconds):
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "Yea-Line"
+
+
+def startup_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --hidden'
+    pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    return f'"{pyw if os.path.exists(pyw) else sys.executable}" "{os.path.abspath(__file__)}" --hidden'
+
+
+def startup_enabled():
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, RUN_NAME)
+            return True
+    except OSError:
+        return False
+
+
+def set_startup(on):
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, startup_command())
+        else:
+            try:
+                winreg.DeleteValue(k, RUN_NAME)
+            except FileNotFoundError:
+                pass
+
+
+class ScrollFrame(tk.Frame):
+    """A page that scrolls (scroll bar + mouse wheel) when its content is taller than the window."""
+
+    def __init__(self, parent, bg):
+        super().__init__(parent, bg=bg)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.body = tk.Frame(self.canvas, bg=bg)
+        self.win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.needs_bar = False
+        self.body.bind("<Configure>", self._fit)
+        self.canvas.bind("<Configure>", self._fit)
+        self.bind_all("<MouseWheel>", self._wheel, add="+")
+
+    def _fit(self, _e=None):
+        cw, ch, rh = self.canvas.winfo_width(), self.canvas.winfo_height(), self.body.winfo_reqheight()
+        need = rh > ch + 1
+        if need != self.needs_bar:
+            self.needs_bar = need
+            if need:
+                self.bar.pack(side="right", fill="y", before=self.canvas)
+            else:
+                self.bar.pack_forget()
+                self.canvas.yview_moveto(0)
+        height = max(rh, ch)
+        self.canvas.itemconfigure(self.win, width=cw, height=height)
+        self.canvas.configure(scrollregion=(0, 0, cw, height))
+
+    def _wheel(self, e):
+        if not self.needs_bar:
+            return
+        w = self.winfo_containing(e.x_root, e.y_root)  # only scroll when the pointer is over this page
+        while w is not None and w is not self:
+            w = w.master
+        if w is self:
+            self.canvas.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Yea-Line")
         self._set_icon()
-        self.geometry(f"{px(660)}x{px(820)}")
-        self.minsize(px(580), px(700))
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(px(660), sw - px(40)), min(px(820), sh - px(100))  # never taller than a small laptop screen
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 4)}")
+        self.minsize(min(px(520), w), min(px(420), h))
+        self.tray = None
 
         # state
         self.off_hook = self.bot_active = self.ringing = self.testing = False
@@ -146,9 +228,28 @@ class App(tk.Tk):
         self.test_var.trace_add("write", lambda *_: self._on_test_number())
         self.dial_var.trace_add("write", lambda *_: self._on_dial_cmd())
         self.theme_var.trace_add("write", lambda *_: (self._save(), self._apply_theme()))
+        self.bg_var = tk.BooleanVar(value=bool(cfg.get("run_in_background", True)))
+        self.bg_var.trace_add("write", lambda *_: self._save())
+        self.startup_var = tk.BooleanVar(value=startup_enabled())
+        self.startup_var.trace_add("write", lambda *_: self._on_startup_toggle())
+        sd = cfg.get("speed_dial", {})
+        self.sd_enabled = tk.BooleanVar(value=bool(sd.get("enabled")))
+        self.sd_name, self.sd_num = {}, {}
+        for d in "123456789":
+            e = (sd.get("entries") or {}).get(d, {})
+            self.sd_name[d] = tk.StringVar(value=e.get("name", ""))
+            self.sd_num[d] = tk.StringVar(value=e.get("number", ""))
+            self.sd_name[d].trace_add("write", lambda *_: self._apply_speed())
+            self.sd_num[d].trace_add("write", lambda *_: self._apply_speed())
+        self.sd_enabled.trace_add("write", lambda *_: self._apply_speed())
+        self._apply_speed(save=False)
 
         self.dark = self._want_dark()
         self._build()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_tray()
+        if HIDDEN and self.tray:
+            self.withdraw()
 
         threading.Thread(target=m.main, daemon=True).start()
         self.after(100, self._poll)
@@ -158,29 +259,86 @@ class App(tk.Tk):
         self.after(500, self._check_phone)
 
     def _set_icon(self):
-        here = os.path.dirname(os.path.abspath(__file__))
         try:  # own taskbar identity so Windows shows the Yea-Line icon instead of Python's
-            import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YeaLine.App")
         except Exception:
             pass
-        try:
-            self.iconbitmap(os.path.join(here, "yealine.ico"))
-        except tk.TclError:
+        try:  # the icons are embedded in the program (yea_assets), so nothing can go missing next to the exe
+            self._icons = [tk.PhotoImage(data=assets.ICONS[n]) for n in sorted(assets.ICONS)]
+            self.iconphoto(True, *self._icons)
+        except Exception:
             pass
 
     def _logo_image(self):
-        here = os.path.dirname(os.path.abspath(__file__))
-        sizes = [28, 35, 42, 49, 56, 70, 84]
-        n = min(sizes, key=lambda v: abs(v - px(28)))
+        n = min(assets.HEADER, key=lambda v: abs(v - px(28)))
         try:
-            return tk.PhotoImage(file=os.path.join(here, f"yealine_hdr_{n}.png"))
+            return tk.PhotoImage(data=assets.HEADER[n])
         except tk.TclError:
             return None
 
+    # ---- tray, startup, speed dial ------------------------------------
+    def _apply_speed(self, save=True):
+        m.speed_dial["enabled"] = self.sd_enabled.get()
+        m.speed_dial["entries"] = {d: self.sd_num[d].get().strip() for d in "123456789"}
+        m.speed_dial["names"] = {d: self.sd_name[d].get().strip() for d in "123456789"}
+        if save:
+            self._save()
+
+    def _on_startup_toggle(self):
+        try:
+            set_startup(self.startup_var.get())
+        except OSError as e:
+            messagebox.showerror("Yea-Line", f"Could not change the startup setting: {e}")
+
+    def _start_tray(self):
+        try:
+            import pystray
+            from PIL import Image
+            img = Image.open(io.BytesIO(base64.b64decode(assets.ICONS[64])))
+            menu = pystray.Menu(pystray.MenuItem("Open Yea-Line", lambda: events.put(("tray_show", {})), default=True),
+                                pystray.MenuItem("Quit", lambda: events.put(("tray_quit", {}))))
+            self.tray = pystray.Icon("Yea-Line", img, "Yea-Line", menu)
+            self.tray.run_detached()
+        except Exception as e:
+            self.tray = None
+            m.out(f"  (tray icon unavailable: {e})")
+
+    def _show_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _on_close(self):
+        if self.tray and self.bg_var.get():
+            self.withdraw()
+            if not getattr(self, "_told_tray", False):
+                self._told_tray = True
+                try:
+                    self.tray.notify("Yea-Line is still running here. Right-click the icon to quit.", "Yea-Line")
+                except Exception:
+                    pass
+        else:
+            self._quit()
+
+    def _quit(self):
+        try:
+            if self.tray:
+                self.tray.stop()
+        except Exception:
+            pass
+        t = threading.Thread(target=m.sip.stop, daemon=True)
+        t.start()
+        t.join(1.5)
+        self.destroy()
+        os._exit(0)
+
     # ---- settings -----------------------------------------------------
     def _save(self):
-        store.save_settings({"test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
+        store.save_settings({"run_in_background": self.bg_var.get(),
+                             "speed_dial": {"enabled": self.sd_enabled.get(),
+                                            "entries": {d: {"name": self.sd_name[d].get().strip(),
+                                                            "number": self.sd_num[d].get().strip()} for d in "123456789"}},
+                             "test_number": m.args.test_number, "dial_cmd": m.args.dial_cmd or "",
                              "mic": m.ivr.mic or "", "theme": THEME_NAMES.get(self.theme_var.get(), "auto"),
                              "assist": {"url": self.ha_url.get().strip(), "pipeline": self.ha_pipeline.get().strip(),
                                         "number": m.args.assist_number},
@@ -248,6 +406,10 @@ class App(tk.Tk):
         t = self.t
         frame = tk.Frame(parent, bg=t["card"], highlightbackground=t["border"], highlightthickness=1)
         frame.pack(fill="both" if expand else "x", expand=expand, padx=14, pady=(12, 0))
+        # long explanatory text always wraps to the card width, so a narrow window never cuts it off
+        frame.bind("<Configure>", lambda e, f=frame: [w.configure(wraplength=max(px(180), e.width - px(40)))
+                                                      for w in f.winfo_children()
+                                                      if isinstance(w, tk.Label) and str(w.cget("wraplength")) not in ("0", "")])
         tk.Label(frame, text=title, bg=t["card"], fg=t["muted"], font=(FONT, 9, "bold")).pack(anchor="w", padx=16, pady=(12, 0))
         return frame
 
@@ -275,14 +437,15 @@ class App(tk.Tk):
         tk.Label(hdr, text="SIP phone for the Yealink MP50", font=(FONT, 10), bg=self.t["bg"], fg=self.t["muted"]).pack(side="left", pady=(4, 0))
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
-        phone, hist, sett = ttk.Frame(nb), ttk.Frame(nb), ttk.Frame(nb)
+        phone, hist, sett = ScrollFrame(nb, self.t["bg"]), ttk.Frame(nb), ScrollFrame(nb, self.t["bg"])
         nb.add(phone, text="Phone")
         nb.add(hist, text="History")
         nb.add(sett, text="Settings")
         nb.select(phone)
-        self._build_phone(phone)
+        self.after(150, lambda: nb.select(phone))  # the first focus event can otherwise land on another tab
+        self._build_phone(phone.body)
         self._build_history(hist)
-        self._build_settings(sett)
+        self._build_settings(sett.body)
         for line in self.log_lines:
             self._log_insert(line)
         self._render()
@@ -361,10 +524,10 @@ class App(tk.Tk):
         box.pack(fill="both", expand=True, padx=16, pady=(8, 4))
         cols = ("when", "type", "number", "length")
         self.tree = ttk.Treeview(box, columns=cols, show="headings", selectmode="browse")
-        for c, label, width, anchor in (("when", "When", 160, "w"), ("type", "Type", 130, "w"),
-                                        ("number", "Number", 120, "w"), ("length", "Length", 80, "e")):
+        for c, label, width, anchor in (("when", "When", 150, "w"), ("type", "Type", 105, "w"),
+                                        ("number", "Number", 100, "w"), ("length", "Length", 62, "e")):
             self.tree.heading(c, text=label, anchor=anchor)
-            self.tree.column(c, width=px(width), anchor=anchor)
+            self.tree.column(c, width=px(width), minwidth=px(48), anchor=anchor, stretch=True)
         self.tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(box, command=self.tree.yview)
         sb.pack(side="right", fill="y")
@@ -374,8 +537,21 @@ class App(tk.Tk):
         ttk.Button(card, text="Clear history", command=self._clear_history).pack(anchor="e", padx=16, pady=(4, 12))
         card.pack_configure(pady=(12, 14))
 
+    def _check(self, parent, text, var):
+        t = self.t
+        return tk.Checkbutton(parent, text=text, variable=var, bg=t["card"], fg=t["text"], activebackground=t["card"],
+                              activeforeground=t["text"], selectcolor=t["input"], font=(FONT, 11), anchor="w")
+
     def _build_settings(self, page):
         t = self.t
+        card = self._card(page, "STARTUP AND BACKGROUND")
+        self._check(card, "Keep running in the system tray when I close the window", self.bg_var).pack(fill="x", padx=16, pady=(8, 0))
+        self._check(card, "Start Yea-Line when I sign in to Windows (starts hidden in the tray)", self.startup_var).pack(
+            fill="x", padx=16, pady=(2, 0))
+        self._label(card, "While hidden, Yea-Line still takes calls and shows a notification when one comes in. "
+                    "Open it again from the tray icon.", muted=True, size=10, anchor="w", wraplength=px(560),
+                    justify="left").pack(fill="x", padx=16, pady=(6, 14))
+
         card = self._card(page, "TEST CALL")
         row = tk.Frame(card, bg=t["card"])
         row.pack(fill="x", padx=16, pady=(8, 0))
@@ -434,6 +610,20 @@ class App(tk.Tk):
         self._label(card, "Leave the password blank to keep the saved one. It is stored in Windows Credential Manager, "
                     "not in the settings file. Dial a number on the phone and pick up to place a SIP call.",
                     muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(4, 14))
+
+        card = self._card(page, "SPEED DIAL (OPTIONAL)")
+        self._check(card, "Dial *1 to *9 on the phone to call a saved number", self.sd_enabled).pack(fill="x", padx=16, pady=(8, 0))
+        grid = tk.Frame(card, bg=t["card"])
+        grid.pack(fill="x", padx=16, pady=(6, 0))
+        grid.columnconfigure(1, weight=1)
+        self._label(grid, "Name (optional)", muted=True, size=10).grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self._label(grid, "Number", muted=True, size=10).grid(row=0, column=2, sticky="w", padx=(12, 0))
+        for r, d in enumerate("123456789", start=1):
+            self._label(grid, "*" + d, bold=True).grid(row=r, column=0, sticky="w", pady=3)
+            self._entry(grid, self.sd_name[d], font=(FONT, 11)).grid(row=r, column=1, sticky="ew", padx=(12, 0), pady=3, ipady=3)
+            self._entry(grid, self.sd_num[d], width=14, font=(FONT, 11)).grid(row=r, column=2, padx=(12, 0), pady=3, ipady=3)
+        self._label(card, "Press * then a digit on the phone and pick up. Digits you leave empty dial normally.",
+                    muted=True, size=10, anchor="w", wraplength=px(560), justify="left").pack(fill="x", padx=16, pady=(6, 14))
 
         card = self._card(page, "DIAL COMMAND (OPTIONAL)")
         self._entry(card, self.dial_var, font=("Consolas", 11)).pack(fill="x", padx=16, pady=(8, 0), ipady=4)
@@ -677,6 +867,15 @@ class App(tk.Tk):
             self._sip_status(data.get("state", ""), data.get("detail", ""))
         elif kind == "sip_incoming":
             self.ringing, self.ring_kind, self.ring_from = True, "Incoming call", data.get("caller", "")
+            if self.tray and not self.winfo_viewable():
+                try:
+                    self.tray.notify(f"Incoming call from {self.ring_from or 'unknown'}", "Yea-Line")
+                except Exception:
+                    pass
+        elif kind == "tray_show":
+            self._show_window()
+        elif kind == "tray_quit":
+            self._quit()
         elif kind == "sip_call":
             st = data.get("state")
             num = data.get("number", "")

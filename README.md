@@ -15,7 +15,9 @@ PBX (tested with FreePBX / Asterisk). It can also talk to **Home Assistant Assis
 - Built-in **test call** (`#878` by default): a keypad voice menu with an echo test and microphone chooser.
 - **Home Assistant Assist**: dial a number (`#999` by default) to talk to your voice assistant, or dial an extension on the PBX that
   forwards to Home Assistant's *Voice over IP* integration (see [pbx-examples](pbx-examples)).
-- Call history, light/dark theme (follows Windows), live keypad and call state.
+- **Runs in the system tray**: close the window and it keeps taking calls, with a notification for incoming ones. Optional start with Windows (starts hidden).
+- **Speed dial** (optional): turn it on in Settings, save numbers for `*1` to `*9`, then dial `*1` and pick up.
+- Call history, light/dark theme (follows Windows), live keypad and call state. Pages scroll, so it fits small laptop screens.
 - Passwords (SIP secret, Home Assistant token) are kept in **Windows Credential Manager**, never in files.
 
 ## Install
@@ -53,6 +55,11 @@ These came from real debugging, and are the usual reasons a setup fails:
   **speech-to-text engine and no wake word**. A pipeline with a wake word makes HA wait forever; one without speech-to-text speaks the
   error. If a call is silent after changing pipelines, reload the *Voice over IP* integration.
 - Home Assistant's VoIP integration only speaks **Opus**; allow `opus` on that endpoint (the PBX transcodes for your phone).
+
+## Roadmap
+
+- Several MP50 phones on one PC (each with its own extension).
+- Dial on the phone and pick up with a saved name shown in call history.
 
 ## ESP32 gateway (experimental)
 
