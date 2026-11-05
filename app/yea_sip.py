@@ -115,6 +115,8 @@ class SipClient:
         self.cfg = None            # dict: server, port, user, password, sip_port
         self.phone = None
         self.call = None           # active VoIPCall (outgoing, or incoming once answered)
+        self._ringback_stop = None  # set to stop the "calling" sound
+        self._ringback_thread = None
         self.held = False          # we put the far end on hold (announcement plays to them, audio both ways paused)
         self._hold_stop = None
         self.pending = None        # incoming VoIPCall that is ringing
@@ -202,8 +204,63 @@ class SipClient:
             return False
         self.call = c
         self.emit("sip_call", state="dialing", number=number, direction="out", reason="")
+        self._start_ringback()
         threading.Thread(target=self._monitor, args=(c, "out", number), daemon=True).start()
         return True
+
+    # ---- "calling" sound -------------------------------------------------
+    def _start_ringback(self):
+        """Play a ringing tone in the handset/speaker while an outgoing call is waiting to be answered, so you can
+        tell it is still ringing. Stopped when the call is answered, ends, or is cancelled."""
+        self._stop_ringback()
+        stop = self._ringback_stop = threading.Event()
+        self._ringback_thread = t = threading.Thread(target=self._ringback, args=(stop,), daemon=True)
+        t.start()
+
+    def _stop_ringback(self):
+        if self._ringback_stop:
+            self._ringback_stop.set()
+            self._ringback_stop = None
+        t, self._ringback_thread = self._ringback_thread, None
+        if t and t is not threading.current_thread():
+            t.join(timeout=1.5)  # the speaker must be closed before the call audio opens it
+
+    def _ringback(self, stop):
+        """UK-style double ring (400 + 450 Hz): 0.4 s on, 0.2 s off, 0.4 s on, 2 s off."""
+        import math
+        import struct
+        try:
+            spk = audio.SpeakerStream()
+        except Exception as e:
+            self.log(f"  (no calling sound: {e})")
+            return
+        try:
+            rate = spk.rate
+            per = rate // 50  # samples per 20 ms frame
+            pattern = [(0.4, True), (0.2, False), (0.4, True), (2.0, False)]
+            n = 0  # running sample index keeps the tone phase continuous
+            nxt = time.monotonic()
+            while not stop.is_set():
+                for secs, on in pattern:
+                    for _ in range(int(secs * 50)):
+                        if stop.is_set():
+                            return
+                        if on:
+                            frame = struct.pack(f"<{per}h", *(
+                                int(5500 * (math.sin(2 * math.pi * 400 * (n + i) / rate) +
+                                            math.sin(2 * math.pi * 450 * (n + i) / rate)))
+                                for i in range(per)))
+                        else:
+                            frame = bytes(per * 2)
+                        n += per
+                        spk.write(frame)
+                        nxt += 0.02
+                        time.sleep(max(0.0, nxt - time.monotonic()))
+        finally:
+            try:
+                spk.close()
+            except Exception:
+                pass
 
     # ---- incoming -------------------------------------------------------
     def _incoming(self, call):
@@ -238,6 +295,7 @@ class SipClient:
     def hangup(self):
         """End the active call, reject a ringing one, or mark an outgoing ring as abandoned."""
         c, p = self.call, self.pending
+        self._stop_ringback()
         if p:
             try:
                 p.deny()
@@ -422,6 +480,7 @@ class SipClient:
                     return
 
     def _stop_bridge(self):
+        self._stop_ringback()
         self.held = False
         if self._hold_stop:
             self._hold_stop.set()
